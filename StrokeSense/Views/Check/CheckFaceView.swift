@@ -1,13 +1,13 @@
 import SwiftUI
 
-struct BaselineFaceView: View {
+struct CheckFaceView: View {
     @Environment(BaselineManager.self) private var baselineManager
     @State private var faceService = FaceDetectionService()
     @State private var recorded = false
 
     var body: some View {
         VStack(spacing: 24) {
-            Text("Look straight at the camera and smile naturally. We'll capture your facial symmetry as a reference.")
+            Text("Look straight at the camera and smile naturally. We'll compare your facial symmetry against your baseline.")
                 .font(.body)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
@@ -29,7 +29,7 @@ struct BaselineFaceView: View {
             }
 
             if recorded {
-                Label("Face baseline recorded", systemImage: "checkmark.circle.fill")
+                Label("Face check recorded", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .font(.headline)
             }
@@ -51,10 +51,11 @@ struct BaselineFaceView: View {
                         .padding(.vertical, 16)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.red)
                 .disabled(!faceService.isFaceDetected)
             } else {
                 NavigationLink {
-                    BaselineArmsView()
+                    CheckArmsView()
                 } label: {
                     Text("Next: Arms")
                         .font(.title3)
@@ -63,6 +64,7 @@ struct BaselineFaceView: View {
                         .padding(.vertical, 16)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.red)
             }
         }
         .padding()
@@ -75,7 +77,7 @@ struct BaselineFaceView: View {
 
 #Preview {
     NavigationStack {
-        BaselineFaceView()
+        CheckFaceView()
             .environment(BaselineManager())
     }
 }

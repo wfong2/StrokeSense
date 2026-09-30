@@ -15,8 +15,8 @@ struct HomeView: View {
 
             Spacer()
 
-            Button {
-                // TODO: Navigate to stroke check flow
+            NavigationLink {
+                CheckFaceView()
             } label: {
                 Text("I don't feel right\nCheck Me")
                     .font(.title2)
@@ -31,9 +31,13 @@ struct HomeView: View {
             Spacer()
         }
         .padding()
+        .navigationTitle("Home")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
 #Preview {
-    HomeView()
+    NavigationStack {
+        HomeView()
+    }
 }

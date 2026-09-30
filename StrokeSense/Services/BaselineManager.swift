@@ -4,6 +4,16 @@ import Foundation
 final class BaselineManager {
     private(set) var hasBaseline: Bool
 
+    var stagedFaceMetrics: FaceMetrics?
+    var stagedArmMetrics: ArmMetrics?
+    var stagedSpeechMetrics: SpeechMetrics?
+
+    func clearStaged() {
+        stagedFaceMetrics = nil
+        stagedArmMetrics = nil
+        stagedSpeechMetrics = nil
+    }
+
     private let fileURL: URL = {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return documents.appending(path: "baseline.json")

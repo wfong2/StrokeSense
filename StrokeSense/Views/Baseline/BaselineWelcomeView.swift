@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct BaselineWelcomeView: View {
+    @Environment(BaselineManager.self) private var baselineManager
+
     var body: some View {
         VStack(spacing: 24) {
             Spacer()
@@ -35,11 +37,13 @@ struct BaselineWelcomeView: View {
         .padding()
         .navigationTitle("Welcome")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { baselineManager.clearStaged() }
     }
 }
 
 #Preview {
     NavigationStack {
         BaselineWelcomeView()
+            .environment(BaselineManager())
     }
 }

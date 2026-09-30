@@ -2,7 +2,6 @@ import SwiftUI
 
 struct BaselineCompleteView: View {
     @Environment(BaselineManager.self) private var baselineManager
-
     var body: some View {
         VStack(spacing: 24) {
             Spacer()
@@ -23,8 +22,9 @@ struct BaselineCompleteView: View {
 
             Spacer()
 
-            Button {
-                saveBaseline()
+            NavigationLink {
+                HomeView()
+                    .onAppear { saveBaseline() }
             } label: {
                 Text("Continue to StrokeSense")
                     .font(.title3)
@@ -43,24 +43,25 @@ struct BaselineCompleteView: View {
     private func saveBaseline() {
         let baseline = BaselineData(
             recordedAt: Date(),
-            faceMetrics: FaceMetrics(
+            faceMetrics: baselineManager.stagedFaceMetrics ?? FaceMetrics(
                 leftEyeOpenProbability: 0.95,
                 rightEyeOpenProbability: 0.95,
                 mouthSmileLeft: 0.8,
                 mouthSmileRight: 0.8
             ),
-            armMetrics: ArmMetrics(
+            armMetrics: baselineManager.stagedArmMetrics ?? ArmMetrics(
                 leftArmRaiseAngle: 90.0,
                 rightArmRaiseAngle: 90.0,
                 steadinessScore: 0.95
             ),
-            speechMetrics: SpeechMetrics(
+            speechMetrics: baselineManager.stagedSpeechMetrics ?? SpeechMetrics(
                 clarity: 0.92,
                 wordsPerMinute: 130.0,
                 samplePhrase: "The quick brown fox jumps over the lazy dog."
             )
         )
         try? baselineManager.save(baseline)
+        baselineManager.clearStaged()
     }
 }
 
