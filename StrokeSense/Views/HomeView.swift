@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct HomeView: View {
+    @State private var showCheckFlow = false
+
     var body: some View {
         VStack(spacing: 32) {
             Spacer()
@@ -15,8 +17,8 @@ struct HomeView: View {
 
             Spacer()
 
-            NavigationLink {
-                CheckFaceView()
+            Button {
+                showCheckFlow = true
             } label: {
                 Text("I don't feel right\nCheck Me")
                     .font(.title2)
@@ -33,6 +35,14 @@ struct HomeView: View {
         .padding()
         .navigationTitle("Home")
         .navigationBarTitleDisplayMode(.inline)
+        .fullScreenCover(isPresented: $showCheckFlow) {
+            NavigationStack {
+                CheckFaceView()
+            }
+            .environment(\.dismissCheckFlow) {
+                showCheckFlow = false
+            }
+        }
     }
 }
 

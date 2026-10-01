@@ -3,7 +3,7 @@ import Vision
 import UIKit
 
 @Observable
-final class FaceDetectionService: NSObject {
+final class FaceDetectionService: NSObject, @unchecked Sendable {
     private(set) var isFaceDetected = false
     private(set) var isSessionRunning = false
     private(set) var latestMetrics: FaceMetrics?
