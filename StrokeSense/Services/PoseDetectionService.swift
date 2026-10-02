@@ -2,6 +2,10 @@ import AVFoundation
 import Vision
 import UIKit
 
+enum ArmSide {
+    case left, right
+}
+
 @Observable
 final class PoseDetectionService: NSObject, @unchecked Sendable {
     private(set) var isBodyDetected = false
@@ -14,6 +18,7 @@ final class PoseDetectionService: NSObject, @unchecked Sendable {
     private let processingQueue = DispatchQueue(label: "com.strokesense.posedetection", qos: .userInitiated)
     private var metricsBuffer: [ArmMetrics] = []
     private let bufferSize = 10
+    var uncappedBuffer = false
 
     #if targetEnvironment(simulator)
     private let isSimulator = true
@@ -57,6 +62,10 @@ final class PoseDetectionService: NSObject, @unchecked Sendable {
         }
     }
 
+    func clearBuffer() {
+        metricsBuffer.removeAll()
+    }
+
     func captureSnapshot() -> ArmMetrics? {
         if isSimulator { return stubMetrics }
 
@@ -79,6 +88,26 @@ final class PoseDetectionService: NSObject, @unchecked Sendable {
             rightArmRaiseAngle: avgRight,
             steadinessScore: steadiness
         )
+    }
+
+    /// Capture averaged angle and steadiness for a single arm from the buffer.
+    func captureSnapshotForArm(_ side: ArmSide) -> (angle: Double, steadiness: Double)? {
+        if isSimulator { return (88.0, 0.95) }
+
+        guard !metricsBuffer.isEmpty else { return nil }
+
+        let count = Double(metricsBuffer.count)
+        let angles: [Double]
+        switch side {
+        case .left: angles = metricsBuffer.map(\.leftArmRaiseAngle)
+        case .right: angles = metricsBuffer.map(\.rightArmRaiseAngle)
+        }
+
+        let avg = angles.reduce(0, +) / count
+        let variance = angles.map { ($0 - avg) * ($0 - avg) }.reduce(0, +) / count
+        let steadiness = min(max(1.0 - (variance / 100.0), 0.0), 1.0)
+
+        return (avg, steadiness)
     }
 
     // MARK: - Private
@@ -152,7 +181,7 @@ extension PoseDetectionService: AVCaptureVideoDataOutputSampleBufferDelegate {
                 self.isBodyDetected = true
                 self.latestMetrics = metrics
                 self.metricsBuffer.append(metrics)
-                if self.metricsBuffer.count > self.bufferSize {
+                if !self.uncappedBuffer && self.metricsBuffer.count > self.bufferSize {
                     self.metricsBuffer.removeFirst()
                 }
             }
@@ -163,23 +192,26 @@ extension PoseDetectionService: AVCaptureVideoDataOutputSampleBufferDelegate {
     }
 
     private func extractMetrics(from body: VNHumanBodyPoseObservation) -> ArmMetrics? {
-        guard let leftShoulder = try? body.recognizedPoint(.leftShoulder),
-              let leftWrist = try? body.recognizedPoint(.leftWrist),
-              let rightShoulder = try? body.recognizedPoint(.rightShoulder),
-              let rightWrist = try? body.recognizedPoint(.rightWrist) else {
-            return nil
-        }
+        let leftShoulder = try? body.recognizedPoint(.leftShoulder)
+        let leftWrist = try? body.recognizedPoint(.leftWrist)
+        let rightShoulder = try? body.recognizedPoint(.rightShoulder)
+        let rightWrist = try? body.recognizedPoint(.rightWrist)
 
         let confidenceThreshold: Float = 0.3
-        guard leftShoulder.confidence > confidenceThreshold,
-              leftWrist.confidence > confidenceThreshold,
-              rightShoulder.confidence > confidenceThreshold,
-              rightWrist.confidence > confidenceThreshold else {
-            return nil
-        }
 
-        let leftAngle = angleDegrees(shoulder: leftShoulder.location, wrist: leftWrist.location)
-        let rightAngle = angleDegrees(shoulder: rightShoulder.location, wrist: rightWrist.location)
+        let hasLeft = (leftShoulder?.confidence ?? 0) > confidenceThreshold
+            && (leftWrist?.confidence ?? 0) > confidenceThreshold
+        let hasRight = (rightShoulder?.confidence ?? 0) > confidenceThreshold
+            && (rightWrist?.confidence ?? 0) > confidenceThreshold
+
+        guard hasLeft || hasRight else { return nil }
+
+        let leftAngle = hasLeft
+            ? angleDegrees(shoulder: leftShoulder!.location, wrist: leftWrist!.location)
+            : 0.0
+        let rightAngle = hasRight
+            ? angleDegrees(shoulder: rightShoulder!.location, wrist: rightWrist!.location)
+            : 0.0
 
         return ArmMetrics(
             leftArmRaiseAngle: leftAngle,
