@@ -1,4 +1,5 @@
 import SwiftUI
+import MapKit
 
 private struct DismissCheckFlowKey: EnvironmentKey {
     nonisolated(unsafe) static let defaultValue: @Sendable () -> Void = {}
@@ -18,6 +19,8 @@ struct CheckResultsView: View {
     @State private var callCountdown: Int?
     @State private var countdownTimer: Timer?
     @State private var timerCancelled = false
+    @State private var llmSummary: String?
+    @State private var urgentCareResults: [MKMapItem] = []
 
     private var baseline: BaselineData? {
         baselineManager.load()
@@ -143,11 +146,22 @@ struct CheckResultsView: View {
                     .font(.largeTitle)
                     .fontWeight(.bold)
 
-                Text(severitySubtitle)
-                    .font(.body)
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal)
+                // LLM summary card
+                if let summary = llmSummary {
+                    Text(summary)
+                        .font(.body)
+                        .multilineTextAlignment(.center)
+                        .padding()
+                        .frame(maxWidth: .infinity)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                        .padding(.horizontal)
+                } else {
+                    Text(severitySubtitle)
+                        .font(.body)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal)
+                }
 
                 // 911 countdown UI
                 if let countdown = callCountdown, !timerCancelled {
@@ -176,6 +190,56 @@ struct CheckResultsView: View {
                     }
                     .padding()
                     .background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+                    .padding(.horizontal)
+                }
+
+                // Nearby urgent care (when 1 area flagged)
+                if flaggedCount == 1 && !urgentCareResults.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Nearby Urgent Care", systemImage: "cross.case.fill")
+                            .font(.headline)
+                            .foregroundStyle(.orange)
+
+                        ForEach(Array(urgentCareResults.enumerated()), id: \.offset) { _, item in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.name ?? "Urgent Care")
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+                                    Text(formatAddress(item.placemark))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button {
+                                    item.openInMaps(launchOptions: [
+                                        MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving
+                                    ])
+                                } label: {
+                                    Image(systemName: "arrow.triangle.turn.up.right.circle.fill")
+                                        .font(.title2)
+                                        .foregroundStyle(.blue)
+                                }
+                            }
+                            if item !== urgentCareResults.last {
+                                Divider()
+                            }
+                        }
+
+                        Button {
+                            if let url = URL(string: "maps://?q=urgent+care+near+me") {
+                                UIApplication.shared.open(url)
+                            }
+                        } label: {
+                            Label("Show All in Maps", systemImage: "map.fill")
+                                .font(.subheadline)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.orange)
+                    }
+                    .padding()
+                    .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
                     .padding(.horizontal)
                 }
 
@@ -219,7 +283,7 @@ struct CheckResultsView: View {
                     baselineManager.clearStaged()
                     dismissCheckFlow()
                 } label: {
-                    Text(flaggedCount >= 1 && !timerCancelled ? "I'm OK — Dismiss" : "Done")
+                    Text(flaggedCount >= 2 && !timerCancelled ? "I'm OK — Dismiss" : "Done")
                         .font(.title3)
                         .fontWeight(.semibold)
                         .frame(maxWidth: .infinity)
@@ -236,8 +300,16 @@ struct CheckResultsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden()
         .onAppear {
-            if flaggedCount >= 1 {
+            if flaggedCount >= 2 {
                 startCountdown()
+            }
+        }
+        .task {
+            await fetchLLMSummary()
+        }
+        .task {
+            if flaggedCount == 1 {
+                await searchNearbyUrgentCare()
             }
         }
         .onDisappear {
@@ -267,6 +339,61 @@ struct CheckResultsView: View {
             timerCancelled = true
             callCountdown = nil
         }
+    }
+
+    // MARK: - Nearby Urgent Care
+
+    private func searchNearbyUrgentCare() async {
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = "urgent care"
+        let search = MKLocalSearch(request: request)
+        do {
+            let response = try await search.start()
+            urgentCareResults = Array(response.mapItems.prefix(3))
+        } catch {
+            urgentCareResults = []
+        }
+    }
+
+    private func formatAddress(_ placemark: MKPlacemark) -> String {
+        let street = [placemark.subThoroughfare, placemark.thoroughfare]
+            .compactMap { $0 }.joined(separator: " ")
+        let parts = ([street, placemark.locality, placemark.administrativeArea] as [String?])
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+        return parts.isEmpty ? "Address unavailable" : parts.joined(separator: ", ")
+    }
+
+    // MARK: - LLM Summary
+
+    private func fetchLLMSummary() async {
+        let faceBaseline = baseline?.faceMetrics.map { ($0.mouthSmileLeft + $0.mouthSmileRight) / 2.0 }
+        let faceCurrent = (currentFace.mouthSmileLeft + currentFace.mouthSmileRight) / 2.0
+        let armBaseline = baseline?.armMetrics.map { armRaiseScore($0) }
+        let armCurrent = armRaiseScore(currentArms)
+        let steadinessBaseline = baseline?.armMetrics?.steadinessScore
+        let steadinessCurrent = currentArms.steadinessScore
+        let speechBaseline = baseline?.speechMetrics?.clarity
+        let speechCurrent = currentSpeech.clarity
+
+        let metrics = LLMService.CheckMetrics(
+            severity: severityTitle,
+            flaggedCount: flaggedCount,
+            faceSymmetry: faceBaseline.map { b in
+                LLMService.MetricPair(baseline: b, current: faceCurrent, changePct: faceChangePct ?? 0)
+            },
+            armRaise: armBaseline.map { b in
+                LLMService.MetricPair(baseline: b, current: armCurrent, changePct: armRaiseChangePct ?? 0)
+            },
+            armSteadiness: steadinessBaseline.map { b in
+                LLMService.MetricPair(baseline: b, current: steadinessCurrent, changePct: armSteadinessChangePct ?? 0)
+            },
+            speechClarity: speechBaseline.map { b in
+                LLMService.MetricPair(baseline: b, current: speechCurrent, changePct: speechChangePct ?? 0)
+            }
+        )
+
+        llmSummary = await LLMService.generateSummary(metrics: metrics)
     }
 
     // MARK: - Result card
