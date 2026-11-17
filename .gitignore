@@ -8,3 +8,12 @@ DerivedData/
 
 # macOS
 .DS_Store
+
+# ML training artifacts
+training/*/data/
+training/*/processed/
+training/*/splits/
+training/*/checkpoints/
+training/*/outputs/
+training/*/exported/
+training/*/.venv/

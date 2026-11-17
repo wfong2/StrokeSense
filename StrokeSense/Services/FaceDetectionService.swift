@@ -14,6 +14,8 @@ final class FaceDetectionService: NSObject, @unchecked Sendable {
     private let processingQueue = DispatchQueue(label: "com.strokesense.facedetection", qos: .userInitiated)
     private var metricsBuffer: [FaceMetrics] = []
     private let bufferSize = 10
+    private var latestPixelBuffer: CVPixelBuffer?
+    private var latestFaceBoundingBox: CGRect?
 
     #if targetEnvironment(simulator)
     private let isSimulator = true
@@ -70,6 +72,54 @@ final class FaceDetectionService: NSObject, @unchecked Sendable {
             mouthSmileRight: metricsBuffer.map(\.mouthSmileRight).reduce(0, +) / count
         )
         return averaged
+    }
+
+    /// Capture a snapshot with ML probability from the face classifier.
+    func captureSnapshotWithML() async -> FaceMetrics? {
+        guard let base = captureSnapshot() else { return nil }
+
+        // Try ML classification on the latest face crop
+        if let pixelBuffer = latestPixelBuffer, let bbox = latestFaceBoundingBox {
+            let faceCrop = cropFace(from: pixelBuffer, boundingBox: bbox)
+            if let cgImage = faceCrop {
+                let mlProb = await FaceClassifierService.shared.classify(faceImage: cgImage)
+                return FaceMetrics(
+                    leftEyeOpenProbability: base.leftEyeOpenProbability,
+                    rightEyeOpenProbability: base.rightEyeOpenProbability,
+                    mouthSmileLeft: base.mouthSmileLeft,
+                    mouthSmileRight: base.mouthSmileRight,
+                    mlProbability: mlProb
+                )
+            }
+        }
+
+        return base
+    }
+
+    /// Crop the face region from a pixel buffer using the Vision bounding box.
+    private func cropFace(from pixelBuffer: CVPixelBuffer, boundingBox: CGRect) -> CGImage? {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let width = ciImage.extent.width
+        let height = ciImage.extent.height
+
+        // Vision bounding box is normalized with origin at bottom-left
+        let faceRect = CGRect(
+            x: boundingBox.origin.x * width,
+            y: boundingBox.origin.y * height,
+            width: boundingBox.width * width,
+            height: boundingBox.height * height
+        )
+
+        // Add 10% margin
+        let margin = max(faceRect.width, faceRect.height) * 0.1
+        let expanded = faceRect.insetBy(dx: -margin, dy: -margin)
+            .intersection(ciImage.extent)
+
+        guard !expanded.isEmpty else { return nil }
+
+        let cropped = ciImage.cropped(to: expanded)
+        let context = CIContext()
+        return context.createCGImage(cropped, from: cropped.extent)
     }
 
     // MARK: - Private
@@ -133,6 +183,8 @@ extension FaceDetectionService: AVCaptureVideoDataOutputSampleBufferDelegate {
             DispatchQueue.main.async {
                 self.isFaceDetected = true
                 self.latestMetrics = metrics
+                self.latestPixelBuffer = pixelBuffer
+                self.latestFaceBoundingBox = face.boundingBox
                 self.metricsBuffer.append(metrics)
                 if self.metricsBuffer.count > self.bufferSize {
                     self.metricsBuffer.removeFirst()

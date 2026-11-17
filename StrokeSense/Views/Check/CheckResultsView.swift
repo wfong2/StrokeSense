@@ -64,11 +64,29 @@ struct CheckResultsView: View {
         return abs((current - baselineVal) / baselineVal) * 100.0
     }
 
+    /// Compute a hybrid face score blending ML probability with heuristic symmetry.
+    /// When ML is available: 0.7 * mlScore + 0.3 * heuristicScore
+    /// When ML is unavailable: 100% heuristic (current behavior).
+    private var currentFaceScore: Double {
+        let heuristic = (currentFace.mouthSmileLeft + currentFace.mouthSmileRight) / 2.0
+        guard let mlProb = currentFace.mlProbability else { return heuristic }
+        // ML probability is stroke likelihood (higher = worse).
+        // Heuristic is symmetry (higher = better).
+        // Invert ML so both scales align: higher = better.
+        let mlScore = 1.0 - mlProb
+        return 0.7 * mlScore + 0.3 * heuristic
+    }
+
+    private var baselineFaceScore: Double? {
+        guard let bm = baseline?.faceMetrics else { return nil }
+        let heuristic = (bm.mouthSmileLeft + bm.mouthSmileRight) / 2.0
+        guard let mlProb = bm.mlProbability else { return heuristic }
+        let mlScore = 1.0 - mlProb
+        return 0.7 * mlScore + 0.3 * heuristic
+    }
+
     private var faceChangePct: Double? {
-        changePct(
-            baseline: baseline?.faceMetrics.map { ($0.mouthSmileLeft + $0.mouthSmileRight) / 2.0 },
-            current: (currentFace.mouthSmileLeft + currentFace.mouthSmileRight) / 2.0
-        )
+        changePct(baseline: baselineFaceScore, current: currentFaceScore)
     }
 
     private var armRaiseChangePct: Double? {
@@ -247,8 +265,8 @@ struct CheckResultsView: View {
                     resultCard(
                         title: "Face Symmetry",
                         icon: "face.smiling",
-                        baselineValue: baseline?.faceMetrics.map { ($0.mouthSmileLeft + $0.mouthSmileRight) / 2.0 },
-                        currentValue: (currentFace.mouthSmileLeft + currentFace.mouthSmileRight) / 2.0,
+                        baselineValue: baselineFaceScore,
+                        currentValue: currentFaceScore,
                         unit: "symmetry"
                     )
 
@@ -367,8 +385,8 @@ struct CheckResultsView: View {
     // MARK: - LLM Summary
 
     private func fetchLLMSummary() async {
-        let faceBaseline = baseline?.faceMetrics.map { ($0.mouthSmileLeft + $0.mouthSmileRight) / 2.0 }
-        let faceCurrent = (currentFace.mouthSmileLeft + currentFace.mouthSmileRight) / 2.0
+        let faceBaseline = baselineFaceScore
+        let faceCurrent = currentFaceScore
         let armBaseline = baseline?.armMetrics.map { armRaiseScore($0) }
         let armCurrent = armRaiseScore(currentArms)
         let steadinessBaseline = baseline?.armMetrics?.steadinessScore

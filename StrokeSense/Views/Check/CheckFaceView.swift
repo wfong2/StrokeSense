@@ -38,10 +38,12 @@ struct CheckFaceView: View {
 
             if !recorded {
                 Button {
-                    if let metrics = faceService.captureSnapshot() {
-                        baselineManager.stagedFaceMetrics = metrics
-                        recorded = true
-                        faceService.stopSession()
+                    Task {
+                        if let metrics = await faceService.captureSnapshotWithML() {
+                            baselineManager.stagedFaceMetrics = metrics
+                            recorded = true
+                            faceService.stopSession()
+                        }
                     }
                 } label: {
                     Text("Record")
