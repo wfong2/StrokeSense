@@ -54,18 +54,37 @@ def main() -> None:
     logger.info("Model traced successfully")
 
     # Convert to CoreML
+    # Use scalar scale (1/255) and handle ImageNet normalization inside a wrapper
     logger.info("Converting to CoreML...")
-    scale = 1.0 / (255.0 * np.array(IMAGENET_STD))
-    bias = -np.array(IMAGENET_MEAN) / np.array(IMAGENET_STD)
+
+    # Wrap model to include ImageNet normalization after 0-1 scaling
+    class NormalizedModel(torch.nn.Module):
+        def __init__(self, base_model):
+            super().__init__()
+            self.base_model = base_model
+            self.register_buffer(
+                "mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1)
+            )
+            self.register_buffer(
+                "std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1)
+            )
+
+        def forward(self, x):
+            x = (x - self.mean) / self.std
+            return self.base_model(x)
+
+    wrapped = NormalizedModel(model)
+    wrapped.eval()
+    traced_wrapped = torch.jit.trace(wrapped, example_input)
 
     mlmodel = ct.convert(
-        traced,
+        traced_wrapped,
         inputs=[
             ct.ImageType(
                 name="faceImage",
                 shape=(1, 3, IMAGE_SIZE, IMAGE_SIZE),
-                scale=scale.tolist(),
-                bias=bias.tolist(),
+                scale=1.0 / 255.0,
+                bias=[0.0, 0.0, 0.0],
                 color_layout=ct.colorlayout.RGB,
             )
         ],

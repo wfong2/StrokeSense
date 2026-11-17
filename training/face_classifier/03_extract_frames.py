@@ -62,11 +62,11 @@ def extract_frames(video_path: Path, output_dir: Path, fps: int) -> int:
 def classify_video(video_path: Path) -> str | None:
     """Determine if a video is affected or control based on path."""
     path_lower = str(video_path).lower()
-    # PalsyNet typically organizes by subdirectory or filename convention
-    if "affected" in path_lower or "palsy" in path_lower:
-        return "affected"
-    elif "control" in path_lower or "normal" in path_lower or "healthy" in path_lower:
+    # Check "unaffected" before "affected" since "unaffected" contains "affected"
+    if "unaffected" in path_lower or "control" in path_lower or "normal" in path_lower or "healthy" in path_lower:
         return "control"
+    elif "affected" in path_lower or "palsy" in path_lower:
+        return "affected"
     return None
 
 
