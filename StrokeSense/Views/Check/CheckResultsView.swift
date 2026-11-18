@@ -31,7 +31,8 @@ struct CheckResultsView: View {
             leftEyeOpenProbability: 0.93,
             rightEyeOpenProbability: 0.94,
             mouthSmileLeft: 0.78,
-            mouthSmileRight: 0.79
+            mouthSmileRight: 0.79,
+            mouthCornerTilt: 0.02
         )
     }
 
@@ -57,68 +58,104 @@ struct CheckResultsView: View {
         )
     }
 
-    // MARK: - Change percentages & severity
+    // MARK: - Drop from baseline & severity
 
-    private func changePct(baseline: Double?, current: Double) -> Double? {
-        guard let baselineVal = baseline, baselineVal != 0 else { return nil }
-        return abs((current - baselineVal) / baselineVal) * 100.0
+    /// All scores are 0–1 with higher = better. A drop is measured in points
+    /// (0–100 scale) so a low baseline can't inflate it, and only a decline
+    /// counts — scoring better than baseline is never a warning sign.
+    private static let minorDropPoints = 10.0
+    private static let significantDropPoints = 25.0
+
+    private func dropPoints(baseline: Double?, current: Double) -> Double? {
+        guard let baselineVal = baseline else { return nil }
+        return (baselineVal - current) * 100.0
     }
 
-    /// Compute a hybrid face score blending ML probability with heuristic symmetry.
-    /// When ML is available: 0.7 * mlScore + 0.3 * heuristicScore
-    /// When ML is unavailable: 100% heuristic (current behavior).
+    /// Face score: 80% landmark geometry + 20% AI model, both as symmetry
+    /// (higher = better). The AI is weighted low until it is retrained on
+    /// matched data; without it the score is 100% geometry.
+    private static let geometryWeight = 0.8
+
+    private func faceScore(_ metrics: FaceMetrics) -> Double {
+        let geometry = metrics.geometrySymmetry
+        guard let mlProb = metrics.mlProbability else { return geometry }
+        return Self.geometryWeight * geometry + (1.0 - Self.geometryWeight) * (1.0 - mlProb)
+    }
+
     private var currentFaceScore: Double {
-        let heuristic = (currentFace.mouthSmileLeft + currentFace.mouthSmileRight) / 2.0
-        guard let mlProb = currentFace.mlProbability else { return heuristic }
-        // ML probability is stroke likelihood (higher = worse).
-        // Heuristic is symmetry (higher = better).
-        // Invert ML so both scales align: higher = better.
-        let mlScore = 1.0 - mlProb
-        return 0.7 * mlScore + 0.3 * heuristic
+        faceScore(currentFace)
     }
 
     private var baselineFaceScore: Double? {
-        guard let bm = baseline?.faceMetrics else { return nil }
-        let heuristic = (bm.mouthSmileLeft + bm.mouthSmileRight) / 2.0
-        guard let mlProb = bm.mlProbability else { return heuristic }
-        let mlScore = 1.0 - mlProb
-        return 0.7 * mlScore + 0.3 * heuristic
+        baseline?.faceMetrics.map { faceScore($0) }
     }
 
-    private var faceChangePct: Double? {
-        changePct(baseline: baselineFaceScore, current: currentFaceScore)
+    private var faceDrop: Double? {
+        dropPoints(baseline: baselineFaceScore, current: currentFaceScore)
     }
 
-    private var armRaiseChangePct: Double? {
-        changePct(
+    private var armRaiseDrop: Double? {
+        dropPoints(
             baseline: baseline?.armMetrics.map { armRaiseScore($0) },
             current: armRaiseScore(currentArms)
         )
     }
 
-    private var armSteadinessChangePct: Double? {
-        changePct(
+    private var armSteadinessDrop: Double? {
+        dropPoints(
             baseline: baseline?.armMetrics?.steadinessScore,
             current: currentArms.steadinessScore
         )
     }
 
-    private var speechChangePct: Double? {
-        changePct(
+    private var speechDrop: Double? {
+        dropPoints(
             baseline: baseline?.speechMetrics?.clarity,
             current: currentSpeech.clarity
         )
     }
 
+    /// Breakdown of the Face card, same direction as the card (higher = more symmetric).
+    private var faceBreakdownText: String {
+        func pct(_ p: Double) -> String { "\(Int((p * 100).rounded()))%" }
+        let baseFace = baseline?.faceMetrics
+        let geometry = "Geometry (80%): baseline \(baseFace.map { pct($0.geometrySymmetry) } ?? "–") · now \(pct(currentFace.geometrySymmetry))"
+        func raw(_ m: FaceMetrics?) -> String {
+            guard let m else { return "–" }
+            let tilt = m.mouthCornerTilt.map { "\(Int(($0 * 100).rounded()))%" } ?? "none"
+            return "tilt \(tilt), eyes \(pct(m.leftEyeOpenProbability))/\(pct(m.rightEyeOpenProbability))"
+        }
+        let rawLine = "Raw: baseline \(raw(baseFace)) · now \(raw(currentFace))"
+        let ai: String
+        if let now = currentFace.mlProbability {
+            ai = "AI (20%): baseline \(baseFace?.mlProbability.map { pct(1.0 - $0) } ?? "not recorded") · now \(pct(1.0 - now))"
+        } else {
+            ai = "AI did not run (geometry only)"
+        }
+        return "\(geometry)\n\(ai)\n\(rawLine)"
+    }
+
     private var flaggedCount: Int {
-        [faceChangePct, armRaiseChangePct, armSteadinessChangePct, speechChangePct]
+        [faceDrop, armRaiseDrop, armSteadinessDrop, speechDrop]
             .compactMap { $0 }
-            .filter { $0 >= 30 }
+            .filter { $0 >= Self.significantDropPoints }
             .count
     }
 
+    private var hasMinorDrop: Bool {
+        [faceDrop, armRaiseDrop, armSteadinessDrop, speechDrop]
+            .compactMap { $0 }
+            .contains { $0 >= Self.minorDropPoints }
+    }
+
+    /// Number of significant drops, but never "Looking Good" while any check
+    /// shows a minor drop — a visible change shouldn't get a green shield.
+    private var severityLevel: Int {
+        max(flaggedCount, hasMinorDrop ? 1 : 0)
+    }
+
     private var severityIcon: String {
-        switch flaggedCount {
+        switch severityLevel {
         case 0: return "checkmark.shield.fill"
         case 1: return "exclamationmark.triangle.fill"
         case 2: return "exclamationmark.octagon.fill"
@@ -127,7 +164,7 @@ struct CheckResultsView: View {
     }
 
     private var severityTitle: String {
-        switch flaggedCount {
+        switch severityLevel {
         case 0: return "Looking Good"
         case 1: return "Be Aware"
         case 2: return "Getting Serious"
@@ -136,7 +173,7 @@ struct CheckResultsView: View {
     }
 
     private var severityColor: Color {
-        switch flaggedCount {
+        switch severityLevel {
         case 0: return .green
         case 1: return .orange
         default: return .red
@@ -144,8 +181,9 @@ struct CheckResultsView: View {
     }
 
     private var severitySubtitle: String {
-        switch flaggedCount {
+        switch severityLevel {
         case 0: return "Your results are within normal range compared to your baseline."
+        case 1 where flaggedCount == 0: return "A small change from your baseline was detected. Re-check in a few minutes."
         case 1: return "One area shows a significant change from your baseline."
         case 2: return "Multiple areas show significant changes from your baseline."
         default: return "Several areas show significant changes. Consider seeking medical attention."
@@ -269,6 +307,13 @@ struct CheckResultsView: View {
                         currentValue: currentFaceScore,
                         unit: "symmetry"
                     )
+
+                    Label(
+                        faceBreakdownText,
+                        systemImage: "cpu"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                     resultCard(
                         title: "Arm Raise",
@@ -398,16 +443,16 @@ struct CheckResultsView: View {
             severity: severityTitle,
             flaggedCount: flaggedCount,
             faceSymmetry: faceBaseline.map { b in
-                LLMService.MetricPair(baseline: b, current: faceCurrent, changePct: faceChangePct ?? 0)
+                LLMService.MetricPair(baseline: b, current: faceCurrent, dropPoints: faceDrop ?? 0)
             },
             armRaise: armBaseline.map { b in
-                LLMService.MetricPair(baseline: b, current: armCurrent, changePct: armRaiseChangePct ?? 0)
+                LLMService.MetricPair(baseline: b, current: armCurrent, dropPoints: armRaiseDrop ?? 0)
             },
             armSteadiness: steadinessBaseline.map { b in
-                LLMService.MetricPair(baseline: b, current: steadinessCurrent, changePct: armSteadinessChangePct ?? 0)
+                LLMService.MetricPair(baseline: b, current: steadinessCurrent, dropPoints: armSteadinessDrop ?? 0)
             },
             speechClarity: speechBaseline.map { b in
-                LLMService.MetricPair(baseline: b, current: speechCurrent, changePct: speechChangePct ?? 0)
+                LLMService.MetricPair(baseline: b, current: speechCurrent, dropPoints: speechDrop ?? 0)
             }
         )
 
@@ -428,7 +473,7 @@ struct CheckResultsView: View {
                     .font(.headline)
 
                 if let baselineVal = baselineValue {
-                    let pct = abs((currentValue - baselineVal) / baselineVal) * 100.0
+                    let drop = (baselineVal - currentValue) * 100.0
 
                     HStack(spacing: 4) {
                         Text("Baseline: \(Int(baselineVal * 100))%")
@@ -440,18 +485,18 @@ struct CheckResultsView: View {
                     }
 
                     HStack(spacing: 4) {
-                        if pct >= 30 {
+                        if drop >= Self.significantDropPoints {
                             Image(systemName: "exclamationmark.octagon.fill")
                                 .foregroundStyle(.red)
                                 .font(.caption)
-                            Text("Significant change (\(String(format: "%.0f", pct))%)")
+                            Text("Significant drop (\(String(format: "%.0f", drop)) pts)")
                                 .font(.caption)
                                 .foregroundStyle(.red)
-                        } else if pct >= 5 {
+                        } else if drop >= Self.minorDropPoints {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .foregroundStyle(.orange)
                                 .font(.caption)
-                            Text("Minor change (\(String(format: "%.0f", pct))%)")
+                            Text("Minor drop (\(String(format: "%.0f", drop)) pts)")
                                 .font(.caption)
                                 .foregroundStyle(.orange)
                         } else {

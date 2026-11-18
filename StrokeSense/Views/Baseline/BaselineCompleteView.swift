@@ -47,7 +47,8 @@ struct BaselineCompleteView: View {
                 leftEyeOpenProbability: 0.95,
                 rightEyeOpenProbability: 0.95,
                 mouthSmileLeft: 0.8,
-                mouthSmileRight: 0.8
+                mouthSmileRight: 0.8,
+                mouthCornerTilt: 0.02
             ),
             armMetrics: baselineManager.stagedArmMetrics ?? ArmMetrics(
                 leftArmRaiseAngle: 90.0,

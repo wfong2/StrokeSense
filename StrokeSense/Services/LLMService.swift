@@ -13,15 +13,17 @@ struct LLMService {
     struct MetricPair: Encodable {
         let baseline: Double
         let current: Double
-        let changePct: Double
+        let dropPoints: Double
     }
 
     static func generateSummary(metrics: CheckMetrics) async -> String? {
         let systemPrompt = """
         You are a health assessment assistant for a stroke screening app. \
         The user just completed three quick checks: face symmetry, arm raise/steadiness, and speech clarity. \
-        Each metric has a personal baseline and a current reading. \
-        A change of 30% or more from baseline is flagged as significant. \
+        Each metric is scored 0-1 (higher is better) with a personal baseline and a current reading. \
+        drop_points is how far the current reading fell below baseline on a 0-100 scale; \
+        a drop of 25 points or more is flagged as significant. \
+        A negative drop means the reading is better than baseline and is not a concern. \
         Produce a concise 2-3 sentence plain-language summary: \
         (1) state the overall assessment, \
         (2) call out any concerning areas by name, \

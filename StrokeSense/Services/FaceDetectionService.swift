@@ -65,11 +65,13 @@ final class FaceDetectionService: NSObject, @unchecked Sendable {
         guard !metricsBuffer.isEmpty else { return latestMetrics }
 
         let count = Double(metricsBuffer.count)
+        let tilts = metricsBuffer.compactMap(\.mouthCornerTilt)
         let averaged = FaceMetrics(
             leftEyeOpenProbability: metricsBuffer.map(\.leftEyeOpenProbability).reduce(0, +) / count,
             rightEyeOpenProbability: metricsBuffer.map(\.rightEyeOpenProbability).reduce(0, +) / count,
             mouthSmileLeft: metricsBuffer.map(\.mouthSmileLeft).reduce(0, +) / count,
-            mouthSmileRight: metricsBuffer.map(\.mouthSmileRight).reduce(0, +) / count
+            mouthSmileRight: metricsBuffer.map(\.mouthSmileRight).reduce(0, +) / count,
+            mouthCornerTilt: tilts.isEmpty ? nil : tilts.reduce(0, +) / Double(tilts.count)
         )
         return averaged
     }
@@ -88,6 +90,7 @@ final class FaceDetectionService: NSObject, @unchecked Sendable {
                     rightEyeOpenProbability: base.rightEyeOpenProbability,
                     mouthSmileLeft: base.mouthSmileLeft,
                     mouthSmileRight: base.mouthSmileRight,
+                    mouthCornerTilt: base.mouthCornerTilt,
                     mlProbability: mlProb
                 )
             }
@@ -159,7 +162,8 @@ final class FaceDetectionService: NSObject, @unchecked Sendable {
             leftEyeOpenProbability: 0.95,
             rightEyeOpenProbability: 0.95,
             mouthSmileLeft: 0.80,
-            mouthSmileRight: 0.80
+            mouthSmileRight: 0.80,
+            mouthCornerTilt: 0.02
         )
     }
 }
@@ -178,7 +182,11 @@ extension FaceDetectionService: AVCaptureVideoDataOutputSampleBufferDelegate {
                 return
             }
 
-            let metrics = self.extractMetrics(from: face)
+            let imageSize = CGSize(
+                width: CVPixelBufferGetWidth(pixelBuffer),
+                height: CVPixelBufferGetHeight(pixelBuffer)
+            )
+            let metrics = self.extractMetrics(from: face, imageSize: imageSize)
 
             DispatchQueue.main.async {
                 self.isFaceDetected = true
@@ -196,11 +204,12 @@ extension FaceDetectionService: AVCaptureVideoDataOutputSampleBufferDelegate {
         try? handler.perform([request])
     }
 
-    private func extractMetrics(from face: VNFaceObservation) -> FaceMetrics {
+    private func extractMetrics(from face: VNFaceObservation, imageSize: CGSize) -> FaceMetrics {
         var leftEyeOpen = 0.9
         var rightEyeOpen = 0.9
         var smileLeft = 0.5
         var smileRight = 0.5
+        var cornerTilt: Double?
 
         if let landmarks = face.landmarks {
             if let leftEye = landmarks.leftEye {
@@ -213,6 +222,11 @@ extension FaceDetectionService: AVCaptureVideoDataOutputSampleBufferDelegate {
                 let smileScore = mouthSmile(outerLips)
                 smileLeft = smileScore.left
                 smileRight = smileScore.right
+                if let leftEye = landmarks.leftEye, let rightEye = landmarks.rightEye {
+                    cornerTilt = mouthCornerTilt(
+                        lips: outerLips, leftEye: leftEye, rightEye: rightEye, imageSize: imageSize
+                    )
+                }
             }
         }
 
@@ -220,8 +234,45 @@ extension FaceDetectionService: AVCaptureVideoDataOutputSampleBufferDelegate {
             leftEyeOpenProbability: leftEyeOpen,
             rightEyeOpenProbability: rightEyeOpen,
             mouthSmileLeft: smileLeft,
-            mouthSmileRight: smileRight
+            mouthSmileRight: smileRight,
+            mouthCornerTilt: cornerTilt
         )
+    }
+
+    /// How uneven the mouth corners are: vertical offset between them divided by
+    /// mouth width, measured along the eye line so a tilted head doesn't count.
+    private func mouthCornerTilt(
+        lips: VNFaceLandmarkRegion2D,
+        leftEye: VNFaceLandmarkRegion2D,
+        rightEye: VNFaceLandmarkRegion2D,
+        imageSize: CGSize
+    ) -> Double? {
+        let lipPoints = lips.pointsInImage(imageSize: imageSize)
+        guard lipPoints.count >= 6 else { return nil }
+
+        func center(_ points: [CGPoint]) -> CGPoint? {
+            guard !points.isEmpty else { return nil }
+            let sum = points.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
+            return CGPoint(x: sum.x / CGFloat(points.count), y: sum.y / CGFloat(points.count))
+        }
+        guard let eyeA = center(leftEye.pointsInImage(imageSize: imageSize)),
+              let eyeB = center(rightEye.pointsInImage(imageSize: imageSize)) else { return nil }
+
+        // Rotate into the eye-line frame to remove head roll.
+        let roll = atan2(eyeB.y - eyeA.y, eyeB.x - eyeA.x)
+        let cosR = cos(-roll), sinR = sin(-roll)
+        func rotate(_ p: CGPoint) -> CGPoint {
+            CGPoint(x: p.x * cosR - p.y * sinR, y: p.x * sinR + p.y * cosR)
+        }
+        // Pick corners after rotating, so they're the ends of the mouth along
+        // the eye line regardless of how the frame or head is oriented.
+        let rotated = lipPoints.map(rotate)
+        guard let a = rotated.min(by: { $0.x < $1.x }),
+              let b = rotated.max(by: { $0.x < $1.x }) else { return nil }
+
+        let width = abs(b.x - a.x)
+        guard width > 0 else { return nil }
+        return Double(abs(b.y - a.y) / width)
     }
 
     private func eyeOpenness(_ region: VNFaceLandmarkRegion2D) -> Double {

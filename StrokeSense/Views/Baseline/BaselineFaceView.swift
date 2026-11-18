@@ -38,10 +38,12 @@ struct BaselineFaceView: View {
 
             if !recorded {
                 Button {
-                    if let metrics = faceService.captureSnapshot() {
-                        baselineManager.stagedFaceMetrics = metrics
-                        recorded = true
-                        faceService.stopSession()
+                    Task {
+                        if let metrics = await faceService.captureSnapshotWithML() {
+                            baselineManager.stagedFaceMetrics = metrics
+                            recorded = true
+                            faceService.stopSession()
+                        }
                     }
                 } label: {
                     Text("Record")
@@ -54,9 +56,13 @@ struct BaselineFaceView: View {
                 .disabled(!faceService.isFaceDetected)
             } else {
                 NavigationLink {
-                    BaselineArmsView()
+                    if DevFlags.faceOnly {
+                        BaselineCompleteView()
+                    } else {
+                        BaselineArmsView()
+                    }
                 } label: {
-                    Text("Next: Arms")
+                    Text(DevFlags.faceOnly ? "Next: Finish" : "Next: Arms")
                         .font(.title3)
                         .fontWeight(.semibold)
                         .frame(maxWidth: .infinity)
