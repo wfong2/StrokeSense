@@ -25,6 +25,8 @@ struct ArmHoldView<Next: View>: View {
     @State private var speaker = AVSpeechSynthesizer()
     @AppStorage("armParticipant") private var participant = ""
     @State private var label: ArmRecordingLog.Label = .normal
+    /// Set when the last hold didn't record enough to measure.
+    @State private var retryMessage: String?
 
     private let getReadySeconds = 3
     // First second is skipped as settling time, leaving ~7 s to see drift.
@@ -35,6 +37,11 @@ struct ArmHoldView<Next: View>: View {
             switch phase {
             case .ready(let side):
                 instructions(for: side)
+                if let retryMessage {
+                    Label(retryMessage, systemImage: "arrow.counterclockwise.circle.fill")
+                        .foregroundStyle(.orange)
+                        .font(.headline)
+                }
                 Spacer()
                 if DevFlags.armDataCollection {
                     dataCollectionControls
@@ -160,6 +167,19 @@ struct ArmHoldView<Next: View>: View {
             } else {
                 ArmRecordingLog.save(recording, side: side, context: context)
             }
+
+            // Never move on with an arm that can't be measured: a missing
+            // baseline arm would silently disable the arm comparison.
+            guard recording.isComplete else {
+                buzz(.error)
+                retryMessage = recording.samples.count < 20
+                    ? "That hold didn't record. Please try the \(side.rawValue) arm again."
+                    : "Keep the phone upright, not on its side. Please try the \(side.rawValue) arm again."
+                speak("That didn't record properly. Lower your arm and let's try the \(side.rawValue) arm again.")
+                phase = .ready(side)
+                return
+            }
+            retryMessage = nil
             buzz(.success)
 
             if side == .right {

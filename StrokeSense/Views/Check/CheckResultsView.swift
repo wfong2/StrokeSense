@@ -93,8 +93,54 @@ struct CheckResultsView: View {
     }
 
 
+    /// Arm Drift score per arm: 80% motion rules (drift, turn, shake) + 20% AI
+    /// (1 − drift probability), same split the face used. The weaker arm decides.
+    /// Without the model it's 100% rules. The AI is trained on synthetic holds
+    /// so far; watch its line in the breakdown for swings on real recordings.
+    private static let armRuleWeight = 0.8
+
+    /// How much lower the arm is held than at baseline, in degrees, beyond which
+    /// it starts to count. Steady checks varied up to ~7° from wrist angle alone.
+    private static let sagAllowance = 8.0
+    /// Sag beyond the allowance at which the sag score reaches 0.
+    private static let sagRange = 20.0
+
+    /// Degrees the arm is held lower than the same arm at baseline (+ = lower).
+    private func sag(_ r: ArmRecording?, vs base: ArmRecording?) -> Double? {
+        guard let now = r?.meanElevation, let then = base?.meanElevation,
+              r?.isComplete == true, base?.isComplete == true else { return nil }
+        return then - now
+    }
+
+    /// Rules score for one arm: the worse of "stayed put during the hold"
+    /// (drift, turn, shake) and "held as high as at baseline". A patient whose
+    /// arm is already sagging when the recording starts may hold steady at a
+    /// low level, so drift alone would miss it.
+    private func armRules(_ r: ArmRecording?, vs base: ArmRecording?) -> Double? {
+        guard let hold = r?.holdScore else { return nil }
+        guard let sag = sag(r, vs: base) else { return hold }
+        let sagScore = 1.0 - min(max(sag - Self.sagAllowance, 0) / Self.sagRange, 1.0)
+        return min(hold, sagScore)
+    }
+
+    /// Pass the baseline's arms as `comparedTo` when scoring a check; the
+    /// baseline itself is scored on its own (no sag).
+    private func armScore(_ metrics: ArmMetrics?, comparedTo base: ArmMetrics? = nil) -> Double? {
+        func one(_ r: ArmRecording?, _ b: ArmRecording?) -> Double? {
+            guard let r, let rules = armRules(r, vs: b) else { return nil }
+            guard let p = ArmClassifierService.shared.driftProbability(r) else { return rules }
+            return Self.armRuleWeight * rules + (1.0 - Self.armRuleWeight) * (1.0 - p)
+        }
+        guard let left = one(metrics?.left, base?.left), let right = one(metrics?.right, base?.right) else { return nil }
+        return min(left, right)
+    }
+
+    private var currentArmScore: Double? {
+        armScore(currentArms, comparedTo: baseline?.armMetrics)
+    }
+
     private var armHoldDrop: Double? {
-        dropPoints(baseline: baseline?.armMetrics?.holdScore, current: currentArms?.holdScore)
+        dropPoints(baseline: armScore(baseline?.armMetrics), current: currentArmScore)
     }
 
     /// Per-arm raw measurements under the arm cards, for calibration.
@@ -113,15 +159,22 @@ struct CheckResultsView: View {
         return "\(line("Baseline", baseline?.armMetrics))\n\(line("Now", currentArms))\n\(armAIText)"
     }
 
-    /// Arm AI drift signal. Info only: trained on synthetic/simulated holds,
-    /// not stroke patients, so it isn't part of the score.
+    /// Both parts of the Arm Drift card per arm, as "staying put" (higher = better),
+    /// the same direction as the card.
     private var armAIText: String {
-        func pct(_ r: ArmRecording?) -> String {
-            guard let r, let p = ArmClassifierService.shared.driftProbability(r) else { return "–" }
-            return "\(Int((p * 100).rounded()))%"
+        func pct(_ v: Double?) -> String { v.map { "\(Int(($0 * 100).rounded()))%" } ?? "–" }
+        func ai(_ r: ArmRecording?) -> Double? {
+            r.flatMap { ArmClassifierService.shared.driftProbability($0) }.map { 1.0 - $0 }
         }
-        func pair(_ m: ArmMetrics?) -> String { "L \(pct(m?.left)) R \(pct(m?.right))" }
-        return "AI drift signal (info only): baseline \(pair(baseline?.armMetrics)) · now \(pair(currentArms))"
+        func deg(_ v: Double?) -> String { v.map { "\(Int($0.rounded()))°" } ?? "–" }
+        let base = baseline?.armMetrics
+        let baseRules = "L \(pct(base?.left?.holdScore)) R \(pct(base?.right?.holdScore))"
+        let nowRules = "L \(pct(armRules(currentArms?.left, vs: base?.left))) R \(pct(armRules(currentArms?.right, vs: base?.right)))"
+        let sagLine = "L \(deg(sag(currentArms?.left, vs: base?.left))) R \(deg(sag(currentArms?.right, vs: base?.right)))"
+        func aiPair(_ m: ArmMetrics?) -> String { "L \(pct(ai(m?.left))) R \(pct(ai(m?.right)))" }
+        return "Sag vs baseline (\(Int(Self.sagAllowance))° allowed): \(sagLine)\n"
+            + "Rules (80%): baseline \(baseRules) · now \(nowRules)\n"
+            + "AI (20%): baseline \(aiPair(base)) · now \(aiPair(currentArms))"
     }
 
     /// Nil when speech was skipped, so placeholder values never count.
@@ -345,8 +398,8 @@ struct CheckResultsView: View {
                         resultCard(
                             title: "Arm Drift",
                             icon: "arrow.down.right",
-                            baselineValue: baseline?.armMetrics?.holdScore,
-                            currentValue: currentArms?.holdScore,
+                            baselineValue: armScore(baseline?.armMetrics),
+                            currentValue: currentArmScore,
                             unit: "hold"
                         )
 
@@ -468,7 +521,7 @@ struct CheckResultsView: View {
                 LLMService.MetricPair(baseline: b, current: faceCurrent, dropPoints: faceDrop ?? 0)
             },
             armCheckIncomplete: armsIncomplete,
-            armDrift: armPair(baseline?.armMetrics?.holdScore, currentArms?.holdScore, armHoldDrop),
+            armDrift: armPair(armScore(baseline?.armMetrics), currentArmScore, armHoldDrop),
             speechClarity: speechBaseline.map { b in
                 LLMService.MetricPair(baseline: b, current: speechCurrent, dropPoints: speechDrop ?? 0)
             }

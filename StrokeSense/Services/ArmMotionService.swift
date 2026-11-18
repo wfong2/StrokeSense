@@ -9,7 +9,14 @@ final class ArmMotionService {
     /// Phone not turned onto its side right now, so the arm can be measured.
     private(set) var isGripUsable = false
 
-    private let manager = CMMotionManager()
+    /// Apple recommends one CMMotionManager per app; separate instances can
+    /// starve each other of updates. SwiftUI may create this service more than
+    /// once while navigating, so all instances share one manager and the most
+    /// recent `start()` owns its updates.
+    private static let manager = CMMotionManager()
+    private static var owner: ObjectIdentifier?
+    private var manager: CMMotionManager { Self.manager }
+
     private var isRecording = false
     private var startTime: TimeInterval?
     private var samples: [ArmSample] = []
@@ -21,10 +28,13 @@ final class ArmMotionService {
     #endif
 
     func start() {
-        guard !isSimulator, manager.isDeviceMotionAvailable, !manager.isDeviceMotionActive else {
+        guard !isSimulator, manager.isDeviceMotionAvailable else {
             if isSimulator { isGripUsable = true }
             return
         }
+        // Take over updates, even if another instance had them.
+        if manager.isDeviceMotionActive { manager.stopDeviceMotionUpdates() }
+        Self.owner = ObjectIdentifier(self)
         manager.deviceMotionUpdateInterval = 1.0 / 50.0
         manager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
             guard let self, let motion else { return }
@@ -38,14 +48,19 @@ final class ArmMotionService {
     }
 
     func stop() {
-        manager.stopDeviceMotionUpdates()
         isRecording = false
+        // Don't cut off another instance that has since taken over.
+        guard Self.owner == ObjectIdentifier(self) else { return }
+        manager.stopDeviceMotionUpdates()
+        Self.owner = nil
     }
 
     func startRecording() {
         samples.removeAll()
         startTime = nil
         isRecording = true
+        // Make sure this instance is the one receiving updates.
+        if Self.owner != ObjectIdentifier(self) || !manager.isDeviceMotionActive { start() }
     }
 
     func finishRecording() -> ArmRecording {
