@@ -1,0 +1,4 @@
+torch==2.4.1
+coremltools==8.1
+numpy<2
+scikit-learn>=1.3
