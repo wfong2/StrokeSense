@@ -17,3 +17,4 @@ training/*/checkpoints/
 training/*/outputs/
 training/*/exported/
 training/*/.venv/
+__pycache__/

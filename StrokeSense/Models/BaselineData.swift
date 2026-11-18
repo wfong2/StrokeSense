@@ -40,10 +40,205 @@ struct FaceMetrics: Codable {
     }
 }
 
+/// One motion-sensor reading during an arm hold. The phone is held in the
+/// outstretched hand, so its tilt follows the arm. Raw sensor values are
+/// saved so recordings can later train an arm-drift classifier; the ML plan's
+/// stroke datasets are also motion-sensor (IMU) data.
+struct ArmSample: Codable {
+    /// Seconds since the recording started.
+    let t: Double
+    /// Gravity direction in the phone's frame, in g (x, y, z).
+    let gravity: [Double]
+    /// Rotation rate in rad/s (x, y, z).
+    let rotationRate: [Double]
+    /// Acceleration from the user's movement, gravity removed, in g (x, y, z).
+    let userAcceleration: [Double]
+
+    private var gx: Double { gravity.count == 3 ? gravity[0] : 0 }
+    private var gy: Double { gravity.count == 3 ? gravity[1] : 0 }
+    private var gz: Double { gravity.count == 3 ? gravity[2] : 0 }
+
+    /// Tilt around the phone's side-to-side axis, in degrees. The arm sinking
+    /// rotates the hand around this axis, and this angle grows by the same
+    /// amount whether the phone is held upright (screen facing the user, 0°)
+    /// or flat (screen up, 90°).
+    var pitch: Double { atan2(-gz, -gy) * 180 / .pi }
+
+    /// How far the phone's side edge dips out of level, in degrees. The forearm
+    /// turning (pronation) shows up here in either grip.
+    var turn: Double { asin(min(max(gx, -1), 1)) * 180 / .pi }
+}
+
+/// A single-arm hold recording and the measurements derived from it.
+struct ArmRecording: Codable {
+    let samples: [ArmSample]
+
+    /// The first second is skipped while the user settles their arm.
+    fileprivate static let settleSeconds = 1.0
+    fileprivate static let windowSeconds = 1.0
+    fileprivate static let minSamples = 20
+
+    private var held: [ArmSample] { samples.filter { $0.t >= Self.settleSeconds } }
+
+    /// Enough readings across the hold, held in a grip the tilt can be read from.
+    var isComplete: Bool {
+        let h = held
+        guard h.count >= Self.minSamples, let first = h.first, let last = h.last,
+              last.t - first.t >= 2.0 else { return false }
+        return isGripUsable
+    }
+
+    private func mean(_ values: [Double]) -> Double? {
+        values.isEmpty ? nil : values.reduce(0, +) / Double(values.count)
+    }
+
+    private var startWindow: [ArmSample] {
+        let h = held
+        guard let first = h.first?.t else { return [] }
+        return h.filter { $0.t < first + Self.windowSeconds }
+    }
+
+    /// Phone not turned onto its side at the start of the hold. On its side,
+    /// the side-to-side axis points up and can't track the arm sinking.
+    var isGripUsable: Bool {
+        guard let turn = mean(startWindow.map(\.turn)) else { return false }
+        return abs(turn) < 30
+    }
+
+    /// Pitch of the phone when the arm is level: 0° held upright (screen facing
+    /// the user), 90° held flat (screen up). Picked from the start of the hold,
+    /// when the arm is raised.
+    var gripPitch: Double? {
+        mean(startWindow.map(\.pitch)).map { $0 < 45 ? 0 : 90 }
+    }
+
+    var gripName: String? {
+        gripPitch.map { $0 == 0 ? "upright" : "flat" }
+    }
+
+    /// Arm angle above horizontal, in degrees: 0 = straight out, −90 = hanging down.
+    private func elevation(_ sample: ArmSample) -> Double? {
+        gripPitch.map { $0 - sample.pitch }
+    }
+
+    /// Mean of `value` over the first and last second of the hold.
+    private func startAndEnd(_ value: (ArmSample) -> Double) -> (start: Double, end: Double)? {
+        let h = held
+        guard let first = h.first?.t, let last = h.last?.t,
+              let start = mean(h.filter { $0.t < first + Self.windowSeconds }.map(value)),
+              let end = mean(h.filter { $0.t > last - Self.windowSeconds }.map(value)) else { return nil }
+        return (start, end)
+    }
+
+    /// How far the forearm turned during the hold, in degrees, either direction.
+    var pronation: Double? {
+        startAndEnd(\.turn).map { abs($0.end - $0.start) }
+    }
+
+    /// Average arm elevation over the hold, in degrees.
+    var meanElevation: Double? { mean(held.compactMap(elevation)) }
+
+    /// How far the arm sank from the start of the hold to the end, in degrees.
+    /// Only downward movement counts; raising the arm is not drift.
+    var drift: Double? {
+        startAndEnd(\.pitch).map { max($0.end - $0.start, 0) }
+    }
+
+    /// Wobble around the arm's overall trend line: standard deviation of the
+    /// tilt after removing a straight-line fit, in degrees.
+    var shake: Double? {
+        let h = held
+        guard h.count >= 3 else { return nil }
+        let n = Double(h.count)
+        let meanT = h.map(\.t).reduce(0, +) / n
+        let meanP = h.map(\.pitch).reduce(0, +) / n
+        let covariance = h.map { ($0.t - meanT) * ($0.pitch - meanP) }.reduce(0, +)
+        let varianceT = h.map { ($0.t - meanT) * ($0.t - meanT) }.reduce(0, +)
+        let slope = varianceT > 0 ? covariance / varianceT : 0
+        let residuals = h.map { $0.pitch - (meanP + slope * ($0.t - meanT)) }
+        return (residuals.map { $0 * $0 }.reduce(0, +) / n).squareRoot()
+    }
+
+    /// 0–1, higher = arm held higher. Horizontal or above = 1, hanging down = 0.
+    var positionScore: Double? {
+        guard isComplete, let elevation = meanElevation else { return nil }
+        return min(max((elevation + 90.0) / 90.0, 0.0), 1.0)
+    }
+
+    /// 0–1, higher = arm stayed put. Starting weights, to be calibrated on device:
+    /// 60% downward drift (20° or more = 0), 25% forearm turning (30° or more = 0),
+    /// 15% shake (3° or more = 0).
+    var holdScore: Double? {
+        guard isComplete, let drift, let pronation, let shake else { return nil }
+        let driftScore = 1.0 - min(drift / 20.0, 1.0)
+        let pronationScore = 1.0 - min(pronation / 30.0, 1.0)
+        let shakeScore = 1.0 - min(shake / 3.0, 1.0)
+        return 0.6 * driftScore + 0.25 * pronationScore + 0.15 * shakeScore
+    }
+}
+
+extension ArmRecording {
+    static let modelSteps = 140
+    static let modelChannels = 5
+
+    /// Input for ArmDriftClassifier: 5 channels × 140 steps (20 Hz over the
+    /// 7 s hold), channel-major. Must match training/arm_classifier/features.py.
+    /// Channels: d_pitch, d_turn (deg, relative to the first second),
+    /// pitch_rate, rot_mag (deg/s), acc_mag (g).
+    var modelInput: [Float]? {
+        let h = samples.filter { $0.t >= Self.settleSeconds }
+        guard h.count >= Self.minSamples, let t0 = h.first?.t, let tLast = h.last?.t,
+              tLast - t0 >= 2.0 else { return nil }
+
+        let times = h.map(\.t)
+        let start = h.filter { $0.t < t0 + Self.windowSeconds }
+        let pitch0 = start.map(\.pitch).reduce(0, +) / Double(start.count)
+        let turn0 = start.map(\.turn).reduce(0, +) / Double(start.count)
+        let toDeg = 180.0 / Double.pi
+        func norm(_ v: [Double]) -> Double { v.map { $0 * $0 }.reduce(0, +).squareRoot() }
+
+        let channels: [[Double]] = [
+            h.map { $0.pitch - pitch0 },
+            h.map { $0.turn - turn0 },
+            h.map { ($0.rotationRate.first ?? 0) * toDeg },
+            h.map { norm($0.rotationRate) * toDeg },
+            h.map { norm($0.userAcceleration) },
+        ]
+
+        // Linear resample onto a fixed grid, holding the end values (numpy.interp).
+        let step = 7.0 / Double(Self.modelSteps)
+        var out: [Float] = []
+        out.reserveCapacity(Self.modelChannels * Self.modelSteps)
+        for values in channels {
+            var j = 0
+            for k in 0..<Self.modelSteps {
+                let g = t0 + Double(k) * step
+                if g <= times[0] { out.append(Float(values[0])); continue }
+                if g >= times[times.count - 1] { out.append(Float(values[values.count - 1])); continue }
+                while times[j + 1] <= g { j += 1 }
+                let f = (g - times[j]) / (times[j + 1] - times[j])
+                out.append(Float(values[j] + f * (values[j + 1] - values[j])))
+            }
+        }
+        return out
+    }
+}
+
 struct ArmMetrics: Codable {
-    let leftArmRaiseAngle: Double
-    let rightArmRaiseAngle: Double
-    let steadinessScore: Double
+    let left: ArmRecording?
+    let right: ArmRecording?
+
+    /// Weaker arm decides: one-sided weakness is the warning sign, and
+    /// averaging both arms would halve it. Nil if either arm is incomplete.
+    var positionScore: Double? {
+        guard let l = left?.positionScore, let r = right?.positionScore else { return nil }
+        return min(l, r)
+    }
+
+    var holdScore: Double? {
+        guard let l = left?.holdScore, let r = right?.holdScore else { return nil }
+        return min(l, r)
+    }
 }
 
 struct SpeechMetrics: Codable {

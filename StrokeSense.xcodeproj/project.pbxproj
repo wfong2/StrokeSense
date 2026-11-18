@@ -257,7 +257,9 @@
 				DEVELOPMENT_ASSET_PATHS = "\"StrokeSense/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "StrokeSense-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = StrokeSense;
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "StrokeSense needs camera access to analyze facial symmetry and arm position during stroke warning checks.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "StrokeSense needs microphone access for the speech check during stroke warning assessment.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "StrokeSense uses speech recognition to analyze your speech during the stroke warning check.";
@@ -290,7 +292,9 @@
 				DEVELOPMENT_ASSET_PATHS = "\"StrokeSense/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "StrokeSense-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = StrokeSense;
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "StrokeSense needs camera access to analyze facial symmetry and arm position during stroke warning checks.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "StrokeSense needs microphone access for the speech check during stroke warning assessment.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "StrokeSense uses speech recognition to analyze your speech during the stroke warning check.";

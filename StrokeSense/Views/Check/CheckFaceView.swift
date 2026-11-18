@@ -57,13 +57,15 @@ struct CheckFaceView: View {
                 .disabled(!faceService.isFaceDetected)
             } else {
                 NavigationLink {
-                    if DevFlags.faceOnly {
-                        CheckResultsView()
-                    } else {
+                    if !DevFlags.skipArms {
                         CheckArmsView()
+                    } else if !DevFlags.skipSpeech {
+                        CheckSpeechView()
+                    } else {
+                        CheckResultsView()
                     }
                 } label: {
-                    Text(DevFlags.faceOnly ? "Next: Results" : "Next: Arms")
+                    Text(!DevFlags.skipArms ? "Next: Arms" : !DevFlags.skipSpeech ? "Next: Speech" : "Next: Results")
                         .font(.title3)
                         .fontWeight(.semibold)
                         .frame(maxWidth: .infinity)

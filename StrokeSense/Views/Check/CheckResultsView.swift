@@ -36,18 +36,15 @@ struct CheckResultsView: View {
         )
     }
 
-    private var currentArms: ArmMetrics {
-        baselineManager.stagedArmMetrics ?? ArmMetrics(
-            leftArmRaiseAngle: 88.0,
-            rightArmRaiseAngle: 89.0,
-            steadinessScore: 0.93
-        )
+    /// Nil when the arm step was skipped. No placeholder values: a missing
+    /// measurement must show as incomplete, never as a real score.
+    private var currentArms: ArmMetrics? {
+        baselineManager.stagedArmMetrics
     }
 
-    private func armRaiseScore(_ metrics: ArmMetrics) -> Double {
-        let left = min(abs(metrics.leftArmRaiseAngle) / 90.0, 1.0)
-        let right = min(abs(metrics.rightArmRaiseAngle) / 90.0, 1.0)
-        return (left + right) / 2.0
+    /// Arm check ran but didn't get enough good frames for one or both arms.
+    private var armsIncomplete: Bool {
+        !DevFlags.skipArms && currentArms?.holdScore == nil
     }
 
     private var currentSpeech: SpeechMetrics {
@@ -66,15 +63,16 @@ struct CheckResultsView: View {
     private static let minorDropPoints = 10.0
     private static let significantDropPoints = 25.0
 
-    private func dropPoints(baseline: Double?, current: Double) -> Double? {
-        guard let baselineVal = baseline else { return nil }
+    private func dropPoints(baseline: Double?, current: Double?) -> Double? {
+        guard let baselineVal = baseline, let current else { return nil }
         return (baselineVal - current) * 100.0
     }
 
-    /// Face score: 80% landmark geometry + 20% AI model, both as symmetry
-    /// (higher = better). The AI is weighted low until it is retrained on
-    /// matched data; without it the score is 100% geometry.
-    private static let geometryWeight = 0.8
+    /// Face score: landmark geometry only; the AI model is info only (shown,
+    /// not scored). On-device it swung 100% → 17% on a normal face, so even a
+    /// 20% weight caused false alerts. Raise this below 1.0 only after a
+    /// retrained model beats geometry on the same test set.
+    private static let geometryWeight = 1.0
 
     private func faceScore(_ metrics: FaceMetrics) -> Double {
         let geometry = metrics.geometrySymmetry
@@ -94,22 +92,42 @@ struct CheckResultsView: View {
         dropPoints(baseline: baselineFaceScore, current: currentFaceScore)
     }
 
-    private var armRaiseDrop: Double? {
-        dropPoints(
-            baseline: baseline?.armMetrics.map { armRaiseScore($0) },
-            current: armRaiseScore(currentArms)
-        )
+
+    private var armHoldDrop: Double? {
+        dropPoints(baseline: baseline?.armMetrics?.holdScore, current: currentArms?.holdScore)
     }
 
-    private var armSteadinessDrop: Double? {
-        dropPoints(
-            baseline: baseline?.armMetrics?.steadinessScore,
-            current: currentArms.steadinessScore
-        )
+    /// Per-arm raw measurements under the arm cards, for calibration.
+    private var armBreakdownText: String {
+        func deg(_ v: Double?) -> String { v.map { "\(Int($0.rounded()))°" } ?? "–" }
+        func arm(_ r: ArmRecording?) -> String {
+            guard let r else { return "–" }
+            let status = !r.isGripUsable ? ", phone on its side" : r.isComplete ? "" : ", incomplete"
+            let grip = r.gripName.map { ", \($0) grip" } ?? ""
+            let shake = r.shake.map { String(format: "%.1f°", $0) } ?? "–"
+            return "elev \(deg(r.meanElevation)), drift \(deg(r.drift)), turn \(deg(r.pronation)), shake \(shake), \(r.samples.count) readings\(grip)\(status)"
+        }
+        func line(_ label: String, _ m: ArmMetrics?) -> String {
+            "\(label) L: \(arm(m?.left))\n\(label) R: \(arm(m?.right))"
+        }
+        return "\(line("Baseline", baseline?.armMetrics))\n\(line("Now", currentArms))\n\(armAIText)"
     }
 
+    /// Arm AI drift signal. Info only: trained on synthetic/simulated holds,
+    /// not stroke patients, so it isn't part of the score.
+    private var armAIText: String {
+        func pct(_ r: ArmRecording?) -> String {
+            guard let r, let p = ArmClassifierService.shared.driftProbability(r) else { return "–" }
+            return "\(Int((p * 100).rounded()))%"
+        }
+        func pair(_ m: ArmMetrics?) -> String { "L \(pct(m?.left)) R \(pct(m?.right))" }
+        return "AI drift signal (info only): baseline \(pair(baseline?.armMetrics)) · now \(pair(currentArms))"
+    }
+
+    /// Nil when speech was skipped, so placeholder values never count.
     private var speechDrop: Double? {
-        dropPoints(
+        guard !DevFlags.skipSpeech else { return nil }
+        return dropPoints(
             baseline: baseline?.speechMetrics?.clarity,
             current: currentSpeech.clarity
         )
@@ -119,7 +137,7 @@ struct CheckResultsView: View {
     private var faceBreakdownText: String {
         func pct(_ p: Double) -> String { "\(Int((p * 100).rounded()))%" }
         let baseFace = baseline?.faceMetrics
-        let geometry = "Geometry (80%): baseline \(baseFace.map { pct($0.geometrySymmetry) } ?? "–") · now \(pct(currentFace.geometrySymmetry))"
+        let geometry = "Geometry (scored): baseline \(baseFace.map { pct($0.geometrySymmetry) } ?? "–") · now \(pct(currentFace.geometrySymmetry))"
         func raw(_ m: FaceMetrics?) -> String {
             guard let m else { return "–" }
             let tilt = m.mouthCornerTilt.map { "\(Int(($0 * 100).rounded()))%" } ?? "none"
@@ -128,7 +146,7 @@ struct CheckResultsView: View {
         let rawLine = "Raw: baseline \(raw(baseFace)) · now \(raw(currentFace))"
         let ai: String
         if let now = currentFace.mlProbability {
-            ai = "AI (20%): baseline \(baseFace?.mlProbability.map { pct(1.0 - $0) } ?? "not recorded") · now \(pct(1.0 - now))"
+            ai = "AI (info only): baseline \(baseFace?.mlProbability.map { pct(1.0 - $0) } ?? "not recorded") · now \(pct(1.0 - now))"
         } else {
             ai = "AI did not run (geometry only)"
         }
@@ -136,14 +154,14 @@ struct CheckResultsView: View {
     }
 
     private var flaggedCount: Int {
-        [faceDrop, armRaiseDrop, armSteadinessDrop, speechDrop]
+        [faceDrop, armHoldDrop, speechDrop]
             .compactMap { $0 }
             .filter { $0 >= Self.significantDropPoints }
             .count
     }
 
     private var hasMinorDrop: Bool {
-        [faceDrop, armRaiseDrop, armSteadinessDrop, speechDrop]
+        [faceDrop, armHoldDrop, speechDrop]
             .compactMap { $0 }
             .contains { $0 >= Self.minorDropPoints }
     }
@@ -154,8 +172,11 @@ struct CheckResultsView: View {
         max(flaggedCount, hasMinorDrop ? 1 : 0)
     }
 
+    /// An incomplete check never gets "Looking Good": the app can't vouch for
+    /// what it couldn't measure.
     private var severityIcon: String {
         switch severityLevel {
+        case 0 where armsIncomplete: return "questionmark.circle.fill"
         case 0: return "checkmark.shield.fill"
         case 1: return "exclamationmark.triangle.fill"
         case 2: return "exclamationmark.octagon.fill"
@@ -165,6 +186,7 @@ struct CheckResultsView: View {
 
     private var severityTitle: String {
         switch severityLevel {
+        case 0 where armsIncomplete: return "Check Incomplete"
         case 0: return "Looking Good"
         case 1: return "Be Aware"
         case 2: return "Getting Serious"
@@ -174,6 +196,7 @@ struct CheckResultsView: View {
 
     private var severityColor: Color {
         switch severityLevel {
+        case 0 where armsIncomplete: return .orange
         case 0: return .green
         case 1: return .orange
         default: return .red
@@ -182,6 +205,7 @@ struct CheckResultsView: View {
 
     private var severitySubtitle: String {
         switch severityLevel {
+        case 0 where armsIncomplete: return "The arm check could not be completed. If you have sudden symptoms, call 911."
         case 0: return "Your results are within normal range compared to your baseline."
         case 1 where flaggedCount == 0: return "A small change from your baseline was detected. Re-check in a few minutes."
         case 1: return "One area shows a significant change from your baseline."
@@ -315,29 +339,31 @@ struct CheckResultsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                    resultCard(
-                        title: "Arm Raise",
-                        icon: "figure.arms.open",
-                        baselineValue: baseline?.armMetrics.map { armRaiseScore($0) },
-                        currentValue: armRaiseScore(currentArms),
-                        unit: "raise"
-                    )
+                    // Arm Position isn't a card: the phone can't tell arm height
+                    // from wrist angle. Elevation stays in the raw line below.
+                    if !DevFlags.skipArms {
+                        resultCard(
+                            title: "Arm Drift",
+                            icon: "arrow.down.right",
+                            baselineValue: baseline?.armMetrics?.holdScore,
+                            currentValue: currentArms?.holdScore,
+                            unit: "hold"
+                        )
 
-                    resultCard(
-                        title: "Arm Steadiness",
-                        icon: "hand.raised.slash",
-                        baselineValue: baseline?.armMetrics?.steadinessScore,
-                        currentValue: currentArms.steadinessScore,
-                        unit: "score"
-                    )
+                        Label(armBreakdownText, systemImage: "figure.stand")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
 
-                    resultCard(
-                        title: "Speech Clarity",
-                        icon: "waveform",
-                        baselineValue: baseline?.speechMetrics?.clarity,
-                        currentValue: currentSpeech.clarity,
-                        unit: "clarity"
-                    )
+                    if !DevFlags.skipSpeech {
+                        resultCard(
+                            title: "Speech Clarity",
+                            icon: "waveform",
+                            baselineValue: baseline?.speechMetrics?.clarity,
+                            currentValue: currentSpeech.clarity,
+                            unit: "clarity"
+                        )
+                    }
                 }
                 .padding(.horizontal)
 
@@ -432,11 +458,7 @@ struct CheckResultsView: View {
     private func fetchLLMSummary() async {
         let faceBaseline = baselineFaceScore
         let faceCurrent = currentFaceScore
-        let armBaseline = baseline?.armMetrics.map { armRaiseScore($0) }
-        let armCurrent = armRaiseScore(currentArms)
-        let steadinessBaseline = baseline?.armMetrics?.steadinessScore
-        let steadinessCurrent = currentArms.steadinessScore
-        let speechBaseline = baseline?.speechMetrics?.clarity
+        let speechBaseline = DevFlags.skipSpeech ? nil : baseline?.speechMetrics?.clarity
         let speechCurrent = currentSpeech.clarity
 
         let metrics = LLMService.CheckMetrics(
@@ -445,12 +467,8 @@ struct CheckResultsView: View {
             faceSymmetry: faceBaseline.map { b in
                 LLMService.MetricPair(baseline: b, current: faceCurrent, dropPoints: faceDrop ?? 0)
             },
-            armRaise: armBaseline.map { b in
-                LLMService.MetricPair(baseline: b, current: armCurrent, dropPoints: armRaiseDrop ?? 0)
-            },
-            armSteadiness: steadinessBaseline.map { b in
-                LLMService.MetricPair(baseline: b, current: steadinessCurrent, dropPoints: armSteadinessDrop ?? 0)
-            },
+            armCheckIncomplete: armsIncomplete,
+            armDrift: armPair(baseline?.armMetrics?.holdScore, currentArms?.holdScore, armHoldDrop),
             speechClarity: speechBaseline.map { b in
                 LLMService.MetricPair(baseline: b, current: speechCurrent, dropPoints: speechDrop ?? 0)
             }
@@ -459,9 +477,14 @@ struct CheckResultsView: View {
         llmSummary = await LLMService.generateSummary(metrics: metrics)
     }
 
+    private func armPair(_ baseline: Double?, _ current: Double?, _ drop: Double?) -> LLMService.MetricPair? {
+        guard let baseline, let current else { return nil }
+        return LLMService.MetricPair(baseline: baseline, current: current, dropPoints: drop ?? 0)
+    }
+
     // MARK: - Result card
 
-    private func resultCard(title: String, icon: String, baselineValue: Double?, currentValue: Double, unit: String) -> some View {
+    private func resultCard(title: String, icon: String, baselineValue: Double?, currentValue: Double?, unit: String) -> some View {
         HStack(spacing: 16) {
             Image(systemName: icon)
                 .font(.title2)
@@ -472,7 +495,11 @@ struct CheckResultsView: View {
                 Text(title)
                     .font(.headline)
 
-                if let baselineVal = baselineValue {
+                if currentValue == nil {
+                    Label("Could not be completed", systemImage: "questionmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else if let baselineVal = baselineValue, let currentValue {
                     let drop = (baselineVal - currentValue) * 100.0
 
                     HStack(spacing: 4) {

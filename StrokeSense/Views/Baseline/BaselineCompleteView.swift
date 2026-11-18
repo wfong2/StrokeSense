@@ -50,11 +50,8 @@ struct BaselineCompleteView: View {
                 mouthSmileRight: 0.8,
                 mouthCornerTilt: 0.02
             ),
-            armMetrics: baselineManager.stagedArmMetrics ?? ArmMetrics(
-                leftArmRaiseAngle: 90.0,
-                rightArmRaiseAngle: 90.0,
-                steadinessScore: 0.95
-            ),
+            // No placeholder: a missing arm baseline must not look like a real one.
+            armMetrics: baselineManager.stagedArmMetrics,
             speechMetrics: baselineManager.stagedSpeechMetrics ?? SpeechMetrics(
                 clarity: 0.92,
                 wordsPerMinute: 130.0,

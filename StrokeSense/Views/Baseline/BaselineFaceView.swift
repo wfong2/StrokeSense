@@ -56,13 +56,15 @@ struct BaselineFaceView: View {
                 .disabled(!faceService.isFaceDetected)
             } else {
                 NavigationLink {
-                    if DevFlags.faceOnly {
-                        BaselineCompleteView()
-                    } else {
+                    if !DevFlags.skipArms {
                         BaselineArmsView()
+                    } else if !DevFlags.skipSpeech {
+                        BaselineSpeechView()
+                    } else {
+                        BaselineCompleteView()
                     }
                 } label: {
-                    Text(DevFlags.faceOnly ? "Next: Finish" : "Next: Arms")
+                    Text(!DevFlags.skipArms ? "Next: Arms" : !DevFlags.skipSpeech ? "Next: Speech" : "Next: Finish")
                         .font(.title3)
                         .fontWeight(.semibold)
                         .frame(maxWidth: .infinity)

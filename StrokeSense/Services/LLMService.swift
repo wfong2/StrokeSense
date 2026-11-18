@@ -5,8 +5,8 @@ struct LLMService {
         let severity: String
         let flaggedCount: Int
         let faceSymmetry: MetricPair?
-        let armRaise: MetricPair?
-        let armSteadiness: MetricPair?
+        let armCheckIncomplete: Bool
+        let armDrift: MetricPair?
         let speechClarity: MetricPair?
     }
 
@@ -19,7 +19,9 @@ struct LLMService {
     static func generateSummary(metrics: CheckMetrics) async -> String? {
         let systemPrompt = """
         You are a health assessment assistant for a stroke screening app. \
-        The user just completed three quick checks: face symmetry, arm raise/steadiness, and speech clarity. \
+        The user just completed quick checks: face symmetry, arm drift (whether an arm sank or turned while held out), and speech clarity. \
+        A missing metric was not measured. If arm_check_incomplete is true, say the arm check could not be completed \
+        and never describe the results as normal or reassuring. \
         Each metric is scored 0-1 (higher is better) with a personal baseline and a current reading. \
         drop_points is how far the current reading fell below baseline on a 0-100 scale; \
         a drop of 25 points or more is flagged as significant. \
