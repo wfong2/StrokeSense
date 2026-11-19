@@ -37,7 +37,15 @@ struct HomeView: View {
         .navigationBarTitleDisplayMode(.inline)
         .fullScreenCover(isPresented: $showCheckFlow) {
             NavigationStack {
-                CheckFaceView()
+                if !DevFlags.skipFace {
+                    CheckFaceView()
+                } else if !DevFlags.skipArms {
+                    CheckArmsView()
+                } else if !DevFlags.skipSpeech {
+                    CheckSpeechView()
+                } else {
+                    CheckResultsView()
+                }
             }
             .environment(\.dismissCheckFlow) {
                 showCheckFlow = false

@@ -241,10 +241,108 @@ struct ArmMetrics: Codable {
     }
 }
 
+/// Measurements from one spoken phrase. Timing comes from the recognizer's
+/// per-word timestamps, so it doesn't depend on when Record/Stop were tapped.
 struct SpeechMetrics: Codable {
-    let clarity: Double
-    let wordsPerMinute: Double
     let samplePhrase: String
+    let transcript: String?
+    /// Fraction of the phrase's words that were recognized (0–1).
+    let wordAccuracy: Double?
+    /// Words per second, from the start of the first word to the end of the last.
+    let speechRate: Double?
+    /// Fraction of that span spent in gaps between words (0–1).
+    let pauseRatio: Double?
+    /// Apple voice analytics, averaged over voiced frames. Shown for
+    /// calibration, not scored yet.
+    let jitter: Double?
+    let shimmer: Double?
+    let pitchVariation: Double?
+    /// Saved recording in Documents/SpeechRecordings, for analysis and training.
+    let audioFileName: String?
+
+    // Pre-November 2026 baselines only.
+    let clarity: Double?
+    let wordsPerMinute: Double?
+
+    init(samplePhrase: String, transcript: String?, wordAccuracy: Double?, speechRate: Double?,
+         pauseRatio: Double?, jitter: Double? = nil, shimmer: Double? = nil,
+         pitchVariation: Double? = nil, audioFileName: String? = nil) {
+        self.samplePhrase = samplePhrase
+        self.transcript = transcript
+        self.wordAccuracy = wordAccuracy
+        self.speechRate = speechRate
+        self.pauseRatio = pauseRatio
+        self.jitter = jitter
+        self.shimmer = shimmer
+        self.pitchVariation = pitchVariation
+        self.audioFileName = audioFileName
+        self.clarity = nil
+        self.wordsPerMinute = nil
+    }
+
+    /// The user couldn't get the phrase recognized during a check and chose to
+    /// continue. Scored as the worst case: being unable to say it is a warning sign.
+    static let unrecognized = SpeechMetrics(
+        samplePhrase: SpeechRecognitionService.samplePhrase, transcript: nil,
+        wordAccuracy: 0, speechRate: 0, pauseRatio: 1
+    )
+
+    var isUnrecognized: Bool { wordAccuracy == 0 && speechRate == 0 }
+
+    /// Enough was recognized to measure accuracy and timing.
+    var isComplete: Bool {
+        wordAccuracy != nil && speechRate != nil && pauseRatio != nil
+    }
+
+    // MARK: - Scoring
+
+    /// Slowing down less than this, relative to baseline, is normal variation.
+    static let rateAllowance = 0.15
+    /// Slowing at which the rate score reaches 0 (allowance + range).
+    static let rateRange = 0.35
+    /// Extra pause share (absolute) that's normal variation.
+    static let pauseAllowance = 0.05
+    static let pauseRange = 0.30
+    /// Words lost vs baseline that are normal recognizer variation: one word
+    /// of the 8-word phrase (on device, normal speech lost 1–2 words).
+    static let wordAllowance = 0.15
+    static let wordRange = 0.50
+
+    /// How many fewer of the phrase's words were recognized than at baseline.
+    func wordsLost(vs base: SpeechMetrics?) -> Double? {
+        guard let now = wordAccuracy, let then = base?.wordAccuracy, base?.isComplete == true else { return nil }
+        return then - now
+    }
+
+    /// How much slower than baseline, as a fraction (0.2 = 20% slower).
+    func slowing(vs base: SpeechMetrics?) -> Double? {
+        guard let now = speechRate, let then = base?.speechRate, then > 0 else { return nil }
+        return 1.0 - now / then
+    }
+
+    /// Extra share of time spent pausing compared with baseline.
+    func extraPauses(vs base: SpeechMetrics?) -> Double? {
+        guard let now = pauseRatio, let then = base?.pauseRatio else { return nil }
+        return now - then
+    }
+
+    /// 0–1, higher = clearer. 40% words + 35% speaking rate + 25% pauses, each
+    /// compared with the user's own baseline, so a word the phone always
+    /// mishears in *their* voice doesn't count against them. Scoring the
+    /// baseline against itself gives 1.0. With no baseline, words count as-is.
+    func rulesScore(vs base: SpeechMetrics? = nil) -> Double? {
+        guard isComplete, let accuracy = wordAccuracy else { return nil }
+        let wordScore = wordsLost(vs: base).map {
+            1.0 - min(max($0 - Self.wordAllowance, 0) / Self.wordRange, 1.0)
+        } ?? accuracy
+        let rateScore = slowing(vs: base).map {
+            1.0 - min(max($0 - Self.rateAllowance, 0) / Self.rateRange, 1.0)
+        } ?? 1.0
+        let pauseScore = extraPauses(vs: base).map {
+            1.0 - min(max($0 - Self.pauseAllowance, 0) / Self.pauseRange, 1.0)
+        } ?? 1.0
+        return 0.40 * wordScore + 0.35 * rateScore + 0.25 * pauseScore
+    }
 }
 
 struct BaselineData: Codable {

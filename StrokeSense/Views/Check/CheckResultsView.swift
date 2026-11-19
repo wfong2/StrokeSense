@@ -47,12 +47,28 @@ struct CheckResultsView: View {
         !DevFlags.skipArms && currentArms?.holdScore == nil
     }
 
-    private var currentSpeech: SpeechMetrics {
-        baselineManager.stagedSpeechMetrics ?? SpeechMetrics(
-            clarity: 0.90,
-            wordsPerMinute: 125.0,
-            samplePhrase: "The quick brown fox jumps over the lazy dog."
-        )
+    /// Nil when the speech step was skipped. No placeholder values.
+    private var currentSpeech: SpeechMetrics? {
+        baselineManager.stagedSpeechMetrics
+    }
+
+    private var speechIncomplete: Bool {
+        !DevFlags.skipSpeech && currentSpeechScore == nil
+    }
+
+    /// Which checks couldn't be measured, for the header.
+    private var incompleteChecks: [String] {
+        (armsIncomplete ? ["arm"] : []) + (speechIncomplete ? ["speech"] : [])
+    }
+
+    /// Speech score: rules only for now (word accuracy, speaking rate and
+    /// pauses vs baseline). The baseline is scored on its own.
+    private var baselineSpeechScore: Double? {
+        baseline?.speechMetrics.flatMap { $0.rulesScore(vs: $0) }
+    }
+
+    private var currentSpeechScore: Double? {
+        currentSpeech?.rulesScore(vs: baseline?.speechMetrics)
     }
 
     // MARK: - Drop from baseline & severity
@@ -88,8 +104,10 @@ struct CheckResultsView: View {
         baseline?.faceMetrics.map { faceScore($0) }
     }
 
+    /// Nil when the face step was skipped, so placeholder values never count.
     private var faceDrop: Double? {
-        dropPoints(baseline: baselineFaceScore, current: currentFaceScore)
+        guard !DevFlags.skipFace else { return nil }
+        return dropPoints(baseline: baselineFaceScore, current: currentFaceScore)
     }
 
 
@@ -180,10 +198,32 @@ struct CheckResultsView: View {
     /// Nil when speech was skipped, so placeholder values never count.
     private var speechDrop: Double? {
         guard !DevFlags.skipSpeech else { return nil }
-        return dropPoints(
-            baseline: baseline?.speechMetrics?.clarity,
-            current: currentSpeech.clarity
-        )
+        return dropPoints(baseline: baselineSpeechScore, current: currentSpeechScore)
+    }
+
+    /// Raw speech measurements under the Speech card, for calibration.
+    private var speechBreakdownText: String {
+        func pct(_ v: Double?) -> String { v.map { "\(Int(($0 * 100).rounded()))%" } ?? "–" }
+        func num(_ v: Double?, _ f: String) -> String { v.map { String(format: f, $0) } ?? "–" }
+        func raw(_ m: SpeechMetrics?) -> String {
+            guard let m else { return "–" }
+            if m.isUnrecognized { return "phrase not recognized" }
+            return "words \(pct(m.wordAccuracy)), rate \(num(m.speechRate, "%.1f"))/s, pauses \(pct(m.pauseRatio))"
+        }
+        func voice(_ m: SpeechMetrics?) -> String {
+            "jitter \(num(m?.jitter, "%.2f")), shimmer \(num(m?.shimmer, "%.2f")), pitch var \(num(m?.pitchVariation, "%.2f"))"
+        }
+        let base = baseline?.speechMetrics, now = currentSpeech
+        let change = "Slower by \(pct(now?.slowing(vs: base)).replacingOccurrences(of: "-", with: "−")) (\(Int(SpeechMetrics.rateAllowance * 100))% allowed) · "
+            + "extra pauses \(pct(now?.extraPauses(vs: base))) (\(Int(SpeechMetrics.pauseAllowance * 100))% allowed)"
+        // Shown as clarity (1 − dysarthria probability), same direction as the card.
+        func ai(_ m: SpeechMetrics?) -> String {
+            pct(SpeechClassifierService.shared.dysarthriaProbability(audioFileName: m?.audioFileName).map { 1.0 - $0 })
+        }
+        return "Baseline: \(raw(base))\nNow: \(raw(now))\n\(change)\n"
+            + "Heard: \"\(now?.transcript ?? "–")\"\n"
+            + "Voice (info only): baseline \(voice(base)) · now \(voice(now))\n"
+            + "AI clarity (info only): baseline \(ai(base)) · now \(ai(now))"
     }
 
     /// Breakdown of the Face card, same direction as the card (higher = more symmetric).
@@ -229,7 +269,7 @@ struct CheckResultsView: View {
     /// what it couldn't measure.
     private var severityIcon: String {
         switch severityLevel {
-        case 0 where armsIncomplete: return "questionmark.circle.fill"
+        case 0 where !incompleteChecks.isEmpty: return "questionmark.circle.fill"
         case 0: return "checkmark.shield.fill"
         case 1: return "exclamationmark.triangle.fill"
         case 2: return "exclamationmark.octagon.fill"
@@ -239,7 +279,7 @@ struct CheckResultsView: View {
 
     private var severityTitle: String {
         switch severityLevel {
-        case 0 where armsIncomplete: return "Check Incomplete"
+        case 0 where !incompleteChecks.isEmpty: return "Check Incomplete"
         case 0: return "Looking Good"
         case 1: return "Be Aware"
         case 2: return "Getting Serious"
@@ -247,9 +287,22 @@ struct CheckResultsView: View {
         }
     }
 
+    /// The next step for the AI summary, matching what this screen shows
+    /// (urgent care at one significant drop, the 911 countdown at two or more).
+    private var recommendedAction: String {
+        switch flaggedCount {
+        case 2...: return "Call 911 now. The app is counting down to call 911."
+        case 1: return "Get checked at urgent care soon (nearby locations are listed). Call 911 if symptoms are sudden or getting worse."
+        default:
+            if !incompleteChecks.isEmpty { return "Try the check again. If you have sudden symptoms, call 911." }
+            if hasMinorDrop { return "Rest and re-check in a few minutes. If you have sudden symptoms, call 911." }
+            return "No action needed now. Re-check if anything changes. If you have sudden symptoms, call 911."
+        }
+    }
+
     private var severityColor: Color {
         switch severityLevel {
-        case 0 where armsIncomplete: return .orange
+        case 0 where !incompleteChecks.isEmpty: return .orange
         case 0: return .green
         case 1: return .orange
         default: return .red
@@ -258,7 +311,8 @@ struct CheckResultsView: View {
 
     private var severitySubtitle: String {
         switch severityLevel {
-        case 0 where armsIncomplete: return "The arm check could not be completed. If you have sudden symptoms, call 911."
+        case 0 where !incompleteChecks.isEmpty:
+            return "The \(incompleteChecks.joined(separator: " and ")) check could not be completed. If you have sudden symptoms, call 911."
         case 0: return "Your results are within normal range compared to your baseline."
         case 1 where flaggedCount == 0: return "A small change from your baseline was detected. Re-check in a few minutes."
         case 1: return "One area shows a significant change from your baseline."
@@ -377,20 +431,22 @@ struct CheckResultsView: View {
                 }
 
                 VStack(spacing: 16) {
-                    resultCard(
-                        title: "Face Symmetry",
-                        icon: "face.smiling",
-                        baselineValue: baselineFaceScore,
-                        currentValue: currentFaceScore,
-                        unit: "symmetry"
-                    )
+                    if !DevFlags.skipFace {
+                        resultCard(
+                            title: "Face Symmetry",
+                            icon: "face.smiling",
+                            baselineValue: baselineFaceScore,
+                            currentValue: currentFaceScore,
+                            unit: "symmetry"
+                        )
 
-                    Label(
-                        faceBreakdownText,
-                        systemImage: "cpu"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                        Label(
+                            faceBreakdownText,
+                            systemImage: "cpu"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
 
                     // Arm Position isn't a card: the phone can't tell arm height
                     // from wrist angle. Elevation stays in the raw line below.
@@ -412,10 +468,14 @@ struct CheckResultsView: View {
                         resultCard(
                             title: "Speech Clarity",
                             icon: "waveform",
-                            baselineValue: baseline?.speechMetrics?.clarity,
-                            currentValue: currentSpeech.clarity,
+                            baselineValue: baselineSpeechScore,
+                            currentValue: currentSpeechScore,
                             unit: "clarity"
                         )
+
+                        Label(speechBreakdownText, systemImage: "waveform.badge.magnifyingglass")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
                 .padding(.horizontal)
@@ -511,26 +571,24 @@ struct CheckResultsView: View {
     private func fetchLLMSummary() async {
         let faceBaseline = baselineFaceScore
         let faceCurrent = currentFaceScore
-        let speechBaseline = DevFlags.skipSpeech ? nil : baseline?.speechMetrics?.clarity
-        let speechCurrent = currentSpeech.clarity
-
         let metrics = LLMService.CheckMetrics(
             severity: severityTitle,
             flaggedCount: flaggedCount,
-            faceSymmetry: faceBaseline.map { b in
+            recommendedAction: recommendedAction,
+            faceSymmetry: (DevFlags.skipFace ? nil : faceBaseline).map { b in
                 LLMService.MetricPair(baseline: b, current: faceCurrent, dropPoints: faceDrop ?? 0)
             },
             armCheckIncomplete: armsIncomplete,
-            armDrift: armPair(armScore(baseline?.armMetrics), currentArmScore, armHoldDrop),
-            speechClarity: speechBaseline.map { b in
-                LLMService.MetricPair(baseline: b, current: speechCurrent, dropPoints: speechDrop ?? 0)
-            }
+            armDrift: metricPair(armScore(baseline?.armMetrics), currentArmScore, armHoldDrop),
+            speechCheckIncomplete: speechIncomplete,
+            speechNotRecognized: currentSpeech?.isUnrecognized == true,
+            speechClarity: metricPair(DevFlags.skipSpeech ? nil : baselineSpeechScore, currentSpeechScore, speechDrop)
         )
 
         llmSummary = await LLMService.generateSummary(metrics: metrics)
     }
 
-    private func armPair(_ baseline: Double?, _ current: Double?, _ drop: Double?) -> LLMService.MetricPair? {
+    private func metricPair(_ baseline: Double?, _ current: Double?, _ drop: Double?) -> LLMService.MetricPair? {
         guard let baseline, let current else { return nil }
         return LLMService.MetricPair(baseline: baseline, current: current, dropPoints: drop ?? 0)
     }

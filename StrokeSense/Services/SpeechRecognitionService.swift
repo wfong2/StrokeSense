@@ -1,11 +1,15 @@
 import AVFoundation
 @preconcurrency import Speech
 
+/// Records one spoken phrase, transcribes it on the device, saves the audio,
+/// and measures word accuracy, speaking rate, pauses and voice quality.
 @Observable
 final class SpeechRecognitionService: @unchecked Sendable {
-    static let samplePhrase = "The quick brown fox jumps over the lazy dog."
+    /// Cincinnati Prehospital Stroke Scale phrase, the one EMS crews use.
+    static let samplePhrase = "You can't teach an old dog new tricks."
 
     private(set) var isListening = false
+    private(set) var isProcessing = false
     private(set) var transcription = ""
     var errorMessage: String?
 
@@ -13,8 +17,9 @@ final class SpeechRecognitionService: @unchecked Sendable {
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
-    private var recordingStartTime: Date?
     private var latestResult: SFSpeechRecognitionResult?
+    private var audioFile: AVAudioFile?
+    private var audioURL: URL?
 
     #if targetEnvironment(simulator)
     private let isSimulator = true
@@ -22,9 +27,11 @@ final class SpeechRecognitionService: @unchecked Sendable {
     private let isSimulator = false
     #endif
 
-    func startListening() {
-        guard !isListening else { return }
+    /// Starts listening; audio is also written to `audioURL` (a .wav file).
+    func startListening(savingTo audioURL: URL) {
+        guard !isListening, !isProcessing else { return }
         errorMessage = nil
+        transcription = ""
 
         guard !isSimulator else {
             isListening = true
@@ -32,6 +39,7 @@ final class SpeechRecognitionService: @unchecked Sendable {
             return
         }
 
+        self.audioURL = audioURL
         SFSpeechRecognizer.requestAuthorization { [weak self] status in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -49,28 +57,49 @@ final class SpeechRecognitionService: @unchecked Sendable {
         }
     }
 
-    func stopListening() -> SpeechMetrics? {
+    /// Stops listening, waits briefly for the recognizer's final result, and
+    /// returns the measurements. Nil if nothing usable was recognized.
+    @MainActor
+    func stopListening() async -> SpeechMetrics? {
         guard isListening else { return nil }
 
         guard !isSimulator else {
             isListening = false
-            return SpeechMetrics(clarity: 0.92, wordsPerMinute: 130.0, samplePhrase: Self.samplePhrase)
+            return SpeechMetrics(samplePhrase: Self.samplePhrase, transcript: Self.samplePhrase,
+                                 wordAccuracy: 1.0, speechRate: 3.0, pauseRatio: 0.1)
         }
 
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
         recognitionRequest?.endAudio()
-
+        audioFile = nil  // closes the file
         isListening = false
+        isProcessing = true
+        defer { isProcessing = false }
 
-        let metrics = computeMetrics()
+        // The final result (with word timings and voice analytics) arrives
+        // shortly after endAudio(). Measuring a partial result would make the
+        // baseline and the check use different data.
+        for _ in 0..<40 where latestResult?.isFinal != true {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
 
+        let metrics = latestResult.flatMap { computeMetrics(from: $0) }
         recognitionTask?.cancel()
         recognitionRequest = nil
         recognitionTask = nil
         latestResult = nil
-
         return metrics
+    }
+
+    /// Stops without measuring (e.g. the user left the screen).
+    func cancel() {
+        guard isListening else { return }
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        recognitionTask?.cancel()
+        audioFile = nil
+        isListening = false
     }
 
     // MARK: - Private
@@ -93,6 +122,12 @@ final class SpeechRecognitionService: @unchecked Sendable {
             errorMessage = "Speech recognition is not available on this device."
             return
         }
+        // Keep the user's voice on the phone. Without this, iOS may send the
+        // audio to Apple's servers for transcription.
+        guard speechRecognizer.supportsOnDeviceRecognition else {
+            errorMessage = "On-device speech recognition isn't supported on this device."
+            return
+        }
 
         do {
             let audioSession = AVAudioSession.sharedInstance()
@@ -105,96 +140,108 @@ final class SpeechRecognitionService: @unchecked Sendable {
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
+        request.requiresOnDeviceRecognition = true
+        request.addsPunctuation = false
         self.recognitionRequest = request
+        latestResult = nil
 
-        recognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
-            guard let self else { return }
-            if let result {
-                DispatchQueue.main.async {
-                    self.transcription = result.bestTranscription.formattedString
-                    self.latestResult = result
-                }
-            }
-            if error != nil {
-                DispatchQueue.main.async {
-                    self.audioEngine.stop()
-                    self.audioEngine.inputNode.removeTap(onBus: 0)
-                    self.isListening = false
-                }
+        recognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, _ in
+            guard let self, let result else { return }
+            DispatchQueue.main.async {
+                self.transcription = result.bestTranscription.formattedString
+                self.latestResult = result
             }
         }
 
         let inputNode = audioEngine.inputNode
-        let recordingFormat = inputNode.outputFormat(forBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
+        let format = inputNode.outputFormat(forBus: 0)
+        if let audioURL {
+            try? FileManager.default.createDirectory(at: audioURL.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
+            audioFile = try? AVAudioFile(forWriting: audioURL, settings: format.settings)
+        }
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             self?.recognitionRequest?.append(buffer)
+            try? self?.audioFile?.write(from: buffer)
         }
 
         do {
             audioEngine.prepare()
             try audioEngine.start()
             isListening = true
-            recordingStartTime = Date()
-            transcription = ""
         } catch {
             errorMessage = "Failed to start audio engine."
         }
     }
 
-    private func computeMetrics() -> SpeechMetrics? {
-        guard let startTime = recordingStartTime else { return nil }
+    private func computeMetrics(from result: SFSpeechRecognitionResult) -> SpeechMetrics? {
+        let segments = result.bestTranscription.segments.filter { !$0.substring.isEmpty }
+        guard let first = segments.first, let last = segments.last else { return nil }
 
-        let duration = Date().timeIntervalSince(startTime)
-        guard duration > 0 else { return nil }
+        let words = segments.map { Self.normalize($0.substring) }.filter { !$0.isEmpty }
+        let span = last.timestamp + last.duration - first.timestamp
+        guard !words.isEmpty, span > 0 else { return nil }
 
-        let text = transcription
-        let spokenWords = text.lowercased().split(separator: " ").map(String.init)
-        guard !spokenWords.isEmpty else { return nil }
-
-        let durationMinutes = duration / 60.0
-        let wpm = Double(spokenWords.count) / durationMinutes
-
-        // Use real segment confidence if available (from a final result),
-        // otherwise fall back to word-overlap similarity against the target phrase.
-        var clarity: Double
-        if let result = latestResult, result.isFinal {
-            let segments = result.bestTranscription.segments
-            let confidences = segments.map { Double($0.confidence) }
-            let nonZero = confidences.filter { $0 > 0 }
-            if !nonZero.isEmpty {
-                clarity = min(max(nonZero.reduce(0, +) / Double(nonZero.count), 0), 1)
-            } else {
-                clarity = wordOverlapClarity(spokenWords: spokenWords)
-            }
-        } else {
-            clarity = wordOverlapClarity(spokenWords: spokenWords)
+        // Gaps between consecutive words; tiny gaps are normal articulation.
+        var gaps = 0.0
+        for (a, b) in zip(segments, segments.dropFirst()) {
+            let gap = b.timestamp - (a.timestamp + a.duration)
+            if gap > 0.15 { gaps += gap }
         }
 
-        return SpeechMetrics(clarity: clarity, wordsPerMinute: wpm, samplePhrase: Self.samplePhrase)
+        let voice = Self.voiceQuality(result.speechRecognitionMetadata?.voiceAnalytics)
+
+        return SpeechMetrics(
+            samplePhrase: Self.samplePhrase,
+            transcript: result.bestTranscription.formattedString,
+            wordAccuracy: Self.wordAccuracy(spoken: words),
+            speechRate: Double(words.count) / span,
+            pauseRatio: min(gaps / span, 1.0),
+            jitter: voice.jitter,
+            shimmer: voice.shimmer,
+            pitchVariation: voice.pitchVariation,
+            audioFileName: audioURL?.lastPathComponent
+        )
     }
 
-    private func wordOverlapClarity(spokenWords: [String]) -> Double {
-        let targetWords = Self.samplePhrase.lowercased()
-            .filter { $0.isLetter || $0.isWhitespace }
-            .split(separator: " ")
-            .map(String.init)
+    /// Lowercase letters only, so "Can't" and "cant" match.
+    static func normalize(_ word: String) -> String {
+        word.lowercased().filter(\.isLetter)
+    }
 
-        guard !targetWords.isEmpty else { return 0 }
-
-        var remaining = spokenWords
+    /// Fraction of the phrase's words that appear in what was said.
+    static func wordAccuracy(spoken: [String]) -> Double {
+        let target = samplePhrase.split(separator: " ").map { normalize(String($0)) }.filter { !$0.isEmpty }
+        guard !target.isEmpty else { return 0 }
+        // The recognizer often writes "can't" as "can", "cannot" or "can not".
+        var remaining: [String] = []
+        for word in spoken {
+            if word == "not", remaining.last == "cant" { continue }
+            remaining.append(word == "can" || word == "cannot" ? "cant" : word)
+        }
         var matched = 0
-        for target in targetWords {
-            if let idx = remaining.firstIndex(of: target) {
+        for word in target {
+            if let i = remaining.firstIndex(of: word) {
                 matched += 1
-                remaining.remove(at: idx)
+                remaining.remove(at: i)
             }
         }
+        return Double(matched) / Double(target.count)
+    }
 
-        let matchRatio = Double(matched) / Double(targetWords.count)
-        // Penalize extra words (speaking much more than the target phrase)
-        let extraRatio = Double(max(spokenWords.count - targetWords.count, 0)) / Double(targetWords.count)
-        let penalty = min(extraRatio * 0.1, 0.3)
-
-        return min(max(matchRatio - penalty, 0), 1)
+    /// Means of jitter and shimmer, and spread of pitch, over voiced frames.
+    private static func voiceQuality(_ analytics: SFVoiceAnalytics?)
+        -> (jitter: Double?, shimmer: Double?, pitchVariation: Double?) {
+        guard let analytics else { return (nil, nil, nil) }
+        let voicing = analytics.voicing.acousticFeatureValuePerFrame
+        func voiced(_ values: [Double]) -> [Double] {
+            zip(values, voicing).filter { $0.1 > 0.5 }.map(\.0)
+        }
+        func mean(_ v: [Double]) -> Double? { v.isEmpty ? nil : v.reduce(0, +) / Double(v.count) }
+        let pitch = voiced(analytics.pitch.acousticFeatureValuePerFrame)
+        let pitchSD = mean(pitch).map { m in (pitch.map { ($0 - m) * ($0 - m) }.reduce(0, +) / Double(pitch.count)).squareRoot() }
+        return (mean(voiced(analytics.jitter.acousticFeatureValuePerFrame)),
+                mean(voiced(analytics.shimmer.acousticFeatureValuePerFrame)),
+                pitchSD)
     }
 }

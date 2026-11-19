@@ -23,7 +23,7 @@ struct ArmHoldView<Next: View>: View {
     @State private var rightRecording: ArmRecording?
     @State private var task: Task<Void, Never>?
     @State private var speaker = AVSpeechSynthesizer()
-    @AppStorage("armParticipant") private var participant = ""
+    @AppStorage("participant") private var participant = ""
     @State private var label: ArmRecordingLog.Label = .normal
     /// Set when the last hold didn't record enough to measure.
     @State private var retryMessage: String?
@@ -43,7 +43,7 @@ struct ArmHoldView<Next: View>: View {
                         .font(.headline)
                 }
                 Spacer()
-                if DevFlags.armDataCollection {
+                if DevFlags.dataCollection {
                     dataCollectionControls
                 }
                 flatIndicator
@@ -116,7 +116,7 @@ struct ArmHoldView<Next: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Tags each hold for training data (DevFlags.armDataCollection).
+    /// Tags each hold for training data (DevFlags.dataCollection).
     private var dataCollectionControls: some View {
         VStack(spacing: 8) {
             Text("Data collection")
@@ -162,7 +162,7 @@ struct ArmHoldView<Next: View>: View {
             }
 
             let recording = motion.finishRecording()
-            if DevFlags.armDataCollection {
+            if DevFlags.dataCollection {
                 ArmRecordingLog.save(recording, side: side, context: context, label: label, participant: participant)
             } else {
                 ArmRecordingLog.save(recording, side: side, context: context)

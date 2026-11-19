@@ -43,20 +43,10 @@ struct BaselineCompleteView: View {
     private func saveBaseline() {
         let baseline = BaselineData(
             recordedAt: Date(),
-            faceMetrics: baselineManager.stagedFaceMetrics ?? FaceMetrics(
-                leftEyeOpenProbability: 0.95,
-                rightEyeOpenProbability: 0.95,
-                mouthSmileLeft: 0.8,
-                mouthSmileRight: 0.8,
-                mouthCornerTilt: 0.02
-            ),
-            // No placeholder: a missing arm baseline must not look like a real one.
+            faceMetrics: baselineManager.stagedFaceMetrics,
+            // No placeholders: a missing baseline must not look like a real one.
             armMetrics: baselineManager.stagedArmMetrics,
-            speechMetrics: baselineManager.stagedSpeechMetrics ?? SpeechMetrics(
-                clarity: 0.92,
-                wordsPerMinute: 130.0,
-                samplePhrase: "The quick brown fox jumps over the lazy dog."
-            )
+            speechMetrics: baselineManager.stagedSpeechMetrics
         )
         try? baselineManager.save(baseline)
         baselineManager.clearStaged()

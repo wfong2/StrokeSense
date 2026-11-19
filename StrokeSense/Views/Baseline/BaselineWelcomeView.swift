@@ -24,7 +24,15 @@ struct BaselineWelcomeView: View {
             Spacer()
 
             NavigationLink {
-                BaselineFaceView()
+                if !DevFlags.skipFace {
+                    BaselineFaceView()
+                } else if !DevFlags.skipArms {
+                    BaselineArmsView()
+                } else if !DevFlags.skipSpeech {
+                    BaselineSpeechView()
+                } else {
+                    BaselineCompleteView()
+                }
             } label: {
                 Text("Get Started")
                     .font(.title3)
