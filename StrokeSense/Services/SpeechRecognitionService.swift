@@ -178,7 +178,13 @@ final class SpeechRecognitionService: @unchecked Sendable {
         let segments = result.bestTranscription.segments.filter { !$0.substring.isEmpty }
         guard let first = segments.first, let last = segments.last else { return nil }
 
-        let words = segments.map { Self.normalize($0.substring) }.filter { !$0.isEmpty }
+        // On-device recognition sometimes puts several words in one segment
+        // ("You could"), so split on spaces before normalising; otherwise the
+        // words merge ("youcould") and both accuracy and rate undercount.
+        let words = segments
+            .flatMap { $0.substring.split(whereSeparator: \.isWhitespace) }
+            .map { Self.normalize(String($0)) }
+            .filter { !$0.isEmpty }
         let span = last.timestamp + last.duration - first.timestamp
         guard !words.isEmpty, span > 0 else { return nil }
 

@@ -61,14 +61,29 @@ struct CheckResultsView: View {
         (armsIncomplete ? ["arm"] : []) + (speechIncomplete ? ["speech"] : [])
     }
 
-    /// Speech score: rules only for now (word accuracy, speaking rate and
-    /// pauses vs baseline). The baseline is scored on its own.
+    /// Speech score: 50% rules (words, speaking rate and pauses vs baseline)
+    /// + 50% AI clarity (1 − dysarthria probability). On device the AI caught
+    /// mushy speech at a near-normal pace that the rules scored Normal
+    /// (AI 96% → 34%) and stayed steady on normal speech (96–98%). At this
+    /// weight the AI alone can produce a Significant drop. Without the model
+    /// or a saved recording it's 100% rules.
+    private static let speechAIWeight = 0.5
+
+    private func speechScore(_ m: SpeechMetrics?, vs base: SpeechMetrics?) -> Double? {
+        guard let m, let rules = m.rulesScore(vs: base) else { return nil }
+        // "Can't say it" has no recording; it's already the worst case.
+        guard !m.isUnrecognized,
+              let p = SpeechClassifierService.shared.dysarthriaProbability(audioFileName: m.audioFileName)
+        else { return rules }
+        return (1.0 - Self.speechAIWeight) * rules + Self.speechAIWeight * (1.0 - p)
+    }
+
     private var baselineSpeechScore: Double? {
-        baseline?.speechMetrics.flatMap { $0.rulesScore(vs: $0) }
+        speechScore(baseline?.speechMetrics, vs: baseline?.speechMetrics)
     }
 
     private var currentSpeechScore: Double? {
-        currentSpeech?.rulesScore(vs: baseline?.speechMetrics)
+        speechScore(currentSpeech, vs: baseline?.speechMetrics)
     }
 
     // MARK: - Drop from baseline & severity
@@ -220,10 +235,13 @@ struct CheckResultsView: View {
         func ai(_ m: SpeechMetrics?) -> String {
             pct(SpeechClassifierService.shared.dysarthriaProbability(audioFileName: m?.audioFileName).map { 1.0 - $0 })
         }
+        let rulesWeight = Int(((1.0 - Self.speechAIWeight) * 100).rounded())
+        let aiWeight = Int((Self.speechAIWeight * 100).rounded())
         return "Baseline: \(raw(base))\nNow: \(raw(now))\n\(change)\n"
             + "Heard: \"\(now?.transcript ?? "–")\"\n"
             + "Voice (info only): baseline \(voice(base)) · now \(voice(now))\n"
-            + "AI clarity (info only): baseline \(ai(base)) · now \(ai(now))"
+            + "Rules (\(rulesWeight)%): baseline \(pct(base?.rulesScore(vs: base))) · now \(pct(now?.rulesScore(vs: base)))\n"
+            + "AI clarity (\(aiWeight)%): baseline \(ai(base)) · now \(ai(now))"
     }
 
     /// Breakdown of the Face card, same direction as the card (higher = more symmetric).
