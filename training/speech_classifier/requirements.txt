@@ -1,0 +1,7 @@
+torch==2.4.1
+torchaudio==2.4.1
+coremltools==8.1
+numpy<2
+scikit-learn>=1.3
+pyarrow<17
+soundfile>=0.12
