@@ -82,10 +82,10 @@ const rawChildren = [
   table([2400, 4560, 2400], ["Check", "What it looks for", "Status"], [
     ["Face Symmetry", "One side of the face drooping", "Section 2"],
     ["Arm Drift", "One arm sinking, turning or sagging", "Section 3"],
-    ["Speech Clarity", "Slurred or unclear speech", "To be added"],
+    ["Speech Clarity", "Slurred or unclear speech", "Section 4"],
   ]),
   spacer(),
-  p("**A principle across both checks:** measurements we can explain and test (rules) make the decision. AI models are trained alongside them and only get weight once tested on real phones. The face AI failed those tests and is shown for information only; the arm AI passed them so far and has a 20% share."),
+  p("**A principle across all checks:** measurements we can explain and test (rules) come first. AI models are trained alongside them and only get weight once tested on real phones. The face AI failed those tests and is shown for information only. The arm AI passed them and has a 20% share. The speech AI caught a case the rules missed and has a 50% share."),
 
   // ── FACE ───────────────────────────────────────────────────────────
   h1("2. Face Symmetry Detection"),
@@ -271,7 +271,84 @@ const rawChildren = [
 
   // ── SPEECH ─────────────────────────────────────────────────────────
   h1("4. Speech Clarity Detection"),
-  note("To be added."),
+  h2("4.1 Summary"),
+  p("The speech check looks for slurred or unclear speech (dysarthria), one of the B.E. F.A.S.T. warning signs. The user says one sentence, and the app compares it with their own baseline recording:"),
+  bullet("**Rules (50% of the score):** which words were recognized, how fast they were spoken, and how much of the time was pauses."),
+  bullet("**AI model (50% of the score):** a neural network that listens to the sound itself and estimates how slurred it is. It was trained on recordings of people with and without dysarthria."),
+  p("The AI has the largest share of any check, because it was the only part that caught one of our test cases (Section 4.6)."),
+
+  h2("4.2 How the test works"),
+  newList(),
+  step("The screen shows the phrase **\"You can't teach an old dog new tricks.\"** This is the sentence from the Cincinnati Prehospital Stroke Scale that EMS crews use."),
+  step("The user taps **Record**, says the phrase the way they normally talk, and taps **Stop**."),
+  step("Apple's speech recognizer transcribes it **on the phone**. The app requires on-device recognition, so the user's voice is never sent to a server."),
+  step("The app waits for the recognizer's final result, which includes the timing of every word, then measures (Section 4.3). The audio is saved on the phone for the AI model and for future training."),
+  step("If the phrase couldn't be recognized, the user is asked to try again. A baseline must succeed. During a check, the user can also tap **\"I can't say it clearly: continue\"**, which is scored as the worst case, because being unable to say the phrase is itself a warning sign."),
+
+  h2("4.3 Measurements (rules)"),
+  p("Every measurement is compared with the user's own baseline, so a word the phone always mishears in their voice, or a naturally slow speaking style, doesn't count against them."),
+  table([1900, 4160, 3300], ["Measure", "What it is", "Score"], [
+    ["**Words**", "Share of the 8 phrase words that were recognized. \"can\", \"cannot\" and \"can not\" count as \"can't\"", "First 15% lost (one word) free, then 0 at 65% lost"],
+    ["**Speaking rate**", "Words per second, from the start of the first word to the end of the last (from the recognizer's word timings, so tapping Record or Stop late doesn't count)", "First 15% slower free, then 0 at 50% slower"],
+    ["**Pauses**", "Share of that time spent in gaps between words longer than 0.15 s", "First 5% extra free, then 0 at 35% extra"],
+    ["Voice quality", "Jitter, shimmer and pitch variation from Apple's voice analysis", "Shown only, not scored: Apple doesn't always return them"],
+  ]),
+  spacer(),
+  formula("rules = 0.40 × words + 0.35 × speaking rate + 0.25 × pauses"),
+  p("Slurred speech usually produces fewer recognizable words and comes out slower. Pauses help when speech breaks up into separate words, but don't help with continuous mumbling, so they get the smallest share."),
+
+  h2("4.4 AI model"),
+  bullet("**Architecture:** the audio CNN from our ML improvement plan: four convolution layers (32, 64, 128 and 128 filters) on a 128-band Mel spectrogram, a picture of the sound's frequencies over time."),
+  bullet("**The spectrogram is built inside the model.** The app only converts the recording to 16 kHz and takes the middle 4 seconds; the model does the rest. This means the iPhone and the training code can't compute the spectrogram differently. Core ML matched PyTorch exactly."),
+  bullet("**Volume is evened out per recording**, so a loud or quiet voice, or a different microphone, matters less."),
+  bullet("**Training data:** the TORGO database (University of Toronto, free for non-profit use): 15 speakers, 8 with dysarthria from cerebral palsy or ALS (mild to severe) and 7 healthy, 16,552 recordings. Both groups were recorded with the same microphones, so the model can't tell them apart by recording equipment, the mistake our face model made."),
+  h3("Tested on people it had never heard"),
+  p("TORGO has only 15 speakers, so we used 4 rounds: each time the model trained on 11–12 people and was tested on the 3–4 it had never heard."),
+  table([1700, 2400, 2630, 2630], ["Speakers", "Condition", "AI's average dysarthria probability", "Correct?"], [
+    ["F01, M01, M02, M04", "Severe dysarthria", "0.86–0.99", "✓ all 4"],
+    ["M05", "Moderate-severe", "0.87", "✓"],
+    ["F03", "Moderate", "0.34", "✗ missed"],
+    ["M03, F04", "**Mild**", "0.75, 0.65", "✓ both"],
+    ["FC01–03, MC01–03", "Healthy", "0.08–0.45", "✓ all 6"],
+    ["MC04", "Healthy", "0.86", "✗ false alarm"],
+  ]),
+  spacer(),
+  p("**Result: 13 of 15 unseen speakers classified correctly, 70% of individual recordings.** Mild cases, the most common kind after a stroke, were caught. But one healthy person was flagged, and on borderline healthy recordings the reading swung from 0.12 to 0.38 just from changing the volume or sample rate."),
+
+  h2("4.5 How the weight is split: 50% rules, 50% AI"),
+  formula("speech score = 0.5 × rules + 0.5 × (1 − AI dysarthria probability)"),
+  p("Both parts are compared with the user's baseline. If the model can't run, the score is 100% rules."),
+  p("**Why the AI gets half:** in our iPhone tests it caught mushy speech at a near-normal pace that the rules scored as Normal (Section 4.6), which is exactly the case the ML plan said word-based rules can't detect. On the tester's normal speech it was steady (96%, 96%, 98%)."),
+  p("**The risk:** at 50%, the AI alone can produce a Significant drop and show nearby urgent care. Comparing against the user's own baseline limits this: someone whose healthy voice the AI always reads as slurred (like MC04) reads low at baseline too, so there's no drop. The remaining risk is the AI swinging on the same voice. The weight is one setting (speechAIWeight in CheckResultsView.swift); if teammates' normal speech produces big AI drops, it should be lowered."),
+
+  h2("4.6 Real iPhone tests (November 18, 2026)"),
+  table([2050, 2200, 1500, 1500, 2110], ["Test", "What the rules measured", "Rules", "AI clarity", "Result (50/50)"], [
+    ["Normal speech", "Words 100% → 88% (\"new chicks\"), same rate, no pauses", "100% → 100%", "96% → 98%", "**Normal** ✓"],
+    ["**Mushy speech, near-normal pace**", "Words 88% (\"new check\"), 20% slower, 10% more pauses", "100% → 90% (**Normal**)", "96% → **34%**", "**Significant (~36 pts)** ✓"],
+    ["Slow, slurred speech", "Words 88% → 13% (\"You can dig all the near chair\"), 47% slower", "100% → 30%", "(model not yet in app)", "**Significant** ✓"],
+  ]),
+  spacer(),
+  p("The second row is the key result: the words still came through and the pace barely changed, so the rules missed it. The AI, listening to how it sounded, didn't."),
+  h3("What testing taught us"),
+  bullet("**Two formulas:** the first version scored speech with Apple's confidence when the final result had arrived and with word matching when it hadn't, so a baseline and a check could be measured differently. The app now always waits for the final result."),
+  bullet("**Audio sent off the phone:** on-device recognition wasn't required, so iOS could send the audio to Apple's servers. It's now required, matching our privacy promise."),
+  bullet("**Button timing:** speaking rate was timed from Record to Stop, so a slow tap looked like slow speech. It now uses word timings."),
+  bullet("**\"Can't\" → \"can\":** the recognizer often drops the \"'t\", so normal speech lost a word every time. Variants now count, and one word of slack is allowed."),
+  bullet("**Merged words:** on-device recognition sometimes returns several words as one piece (\"You could\"). These were merged into one non-word, making a 6-of-8 match look like 25%. Pieces are now split into words."),
+
+  h2("4.7 Limitations"),
+  bullet("TORGO speakers have cerebral palsy or ALS, not stroke, and there are only 8 people with dysarthria. Stroke slurring is related but not identical."),
+  bullet("TORGO was recorded in a lab; the app records on an iPhone held by the user. The AI was tested on one person's iPhone voice so far."),
+  bullet("The AI flagged one healthy TORGO speaker and is sensitive to volume on borderline recordings. At 50% weight, it can cause false alarms on its own."),
+  bullet("Speech recognition is tuned for US English; accents may lose more words, which is why words are compared with the user's own baseline."),
+  bullet("Aphasia (trouble finding or understanding words) is only partly covered, through the words measure."),
+
+  h2("4.8 Next steps"),
+  bullet("**Test the AI on teammates' voices.** If anyone's normal speech produces large AI drops, lower its weight."),
+  bullet("**Collect team recordings** with data-collection mode (normal and simulated slurred), and add them to training and evaluation alongside TORGO."),
+  bullet("**Make the AI less sensitive to volume:** even out loudness before the spectrogram, then retrain."),
+  bullet("**Seek stroke-specific speech data:** AphasiaBank (requires researcher access) and UA-Speech (on request)."),
+
 
   // ── SHARED ─────────────────────────────────────────────────────────
   h1("5. Comparing against the baseline"),
@@ -288,6 +365,7 @@ const rawChildren = [
   spacer(),
   p("Across all checks, the number of significant drops sets the overall result: 0 = Looking Good, 1 = Be Aware, 2 = Getting Serious, 3 or more = Seek Help Now. Nearby urgent care and the 911 countdown only appear for significant drops, so a minor change can never start an emergency on its own."),
   p("**Incomplete checks:** if a check couldn't be measured, its card says \"Could not be completed\" and the header never shows \"Looking Good\". It shows \"Check Incomplete\" with a reminder to call 911 for sudden symptoms. The app never fills in a missing measurement with a made-up score."),
+  p("**The written summary follows the screen:** the AI-written summary at the top is given the app's next step (re-check, urgent care, or 911) and is told not to suggest anything more or less urgent. An early version told a user to \"call 911 immediately\" under a \"Be Aware\" heading."),
 ];
 
 const children = rawChildren.filter(Boolean);
@@ -315,7 +393,7 @@ const doc = new Document({
     config: [
       { reference: "bullets", levels: [{ level: 0, format: LevelFormat.BULLET, text: "•", alignment: AlignmentType.LEFT,
         style: { paragraph: { indent: { left: 720, hanging: 360 } } } }] },
-      ...[1, 2, 3].map((n) => ({ reference: "steps" + n, levels: [{ level: 0, format: LevelFormat.DECIMAL, text: "%1.", alignment: AlignmentType.LEFT,
+      ...[1, 2, 3, 4].map((n) => ({ reference: "steps" + n, levels: [{ level: 0, format: LevelFormat.DECIMAL, text: "%1.", alignment: AlignmentType.LEFT,
         style: { paragraph: { indent: { left: 720, hanging: 360 } } } }] })),
     ],
   },
