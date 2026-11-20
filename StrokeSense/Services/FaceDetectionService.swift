@@ -187,12 +187,16 @@ extension FaceDetectionService: AVCaptureVideoDataOutputSampleBufferDelegate {
                 height: CVPixelBufferGetHeight(pixelBuffer)
             )
             let metrics = self.extractMetrics(from: face, imageSize: imageSize)
+            let boundingBox = face.boundingBox
+            // Handed to the main thread and only read from then on (for the
+            // AI face crop); the camera never writes to a delivered frame.
+            nonisolated(unsafe) let frame = pixelBuffer
 
             DispatchQueue.main.async {
                 self.isFaceDetected = true
                 self.latestMetrics = metrics
-                self.latestPixelBuffer = pixelBuffer
-                self.latestFaceBoundingBox = face.boundingBox
+                self.latestPixelBuffer = frame
+                self.latestFaceBoundingBox = boundingBox
                 self.metricsBuffer.append(metrics)
                 if self.metricsBuffer.count > self.bufferSize {
                     self.metricsBuffer.removeFirst()

@@ -13,8 +13,12 @@ final class ArmMotionService {
     /// starve each other of updates. SwiftUI may create this service more than
     /// once while navigating, so all instances share one manager and the most
     /// recent `start()` owns its updates.
-    private static let manager = CMMotionManager()
-    private static var owner: ObjectIdentifier?
+    ///
+    /// `nonisolated(unsafe)`: both are only touched from the main thread (the
+    /// views call in on the main actor and updates are delivered to `.main`),
+    /// which Swift 6 can't verify for a static.
+    nonisolated(unsafe) private static let manager = CMMotionManager()
+    nonisolated(unsafe) private static var owner: ObjectIdentifier?
     private var manager: CMMotionManager { Self.manager }
 
     private var isRecording = false
